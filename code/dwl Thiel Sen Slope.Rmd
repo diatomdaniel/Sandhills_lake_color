@@ -1,0 +1,252 @@
+---
+title: "Sandhills lake color Thiel-Sen trends"
+author: "Daniel Gschwentner"
+date: "2024-12-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+lapply(c("tidyverse", "trend", "brms", "tidybayes"), require, character.only = T)
+source("code/theme_R.r")
+```
+## Load data
+
+```{r}
+# data
+limnosat.annual <- read_csv("data/Sandhills_limnosat_annual_medians_17Feb25.csv")
+```
+
+## Thiel Sen slope for median DWL
+
+```{r}
+# Thiel Sen-slopes for DWL
+
+# individual lakes
+out.grid <- expand.grid(Hylak_id = unique(limnosat.annual$Hylak_id),
+                        z = NA, p = NA, Sen = NA, sign = NA, dir = NA)
+# loop over lakes
+for(i in 1:nrow(out.grid)){ # lapply does not modify the original grid so use for loop instead
+  # filter data set
+  x <- out.grid$Hylak_id[i]
+  x <- limnosat.annual[limnosat.annual$Hylak_id == x, ]
+  ts.in <- ts(x$dWL, start = 1984, end = 2019)
+  sen <- sens.slope(ts.in)
+  # save stats
+  out.grid[i, "z"] <- sen$statistic[["z"]]
+  out.grid[i, "Sen"] <- sen$estimates[["Sen's slope"]]
+  out.grid[i, "p"] <- sen$p.value
+  out.grid[i, "sign"] <- ifelse(sen$p.value <0.05, "sign.", "ns.") # stat. sign.
+  out.grid[i, "dir"] <- ifelse(sen$statistic[["z"]] < 0, "Decr.", 
+                               ifelse(sen$statistic[["z"]] == 0, "No change", "Incr."))
+}
+
+# tabulate trends
+table(out.grid$sign) # significant trend in 166 lakes; 34% of lakes
+table(out.grid$sign, out.grid$dir) # 100 lakes are moving towards blue wavelengths while 65 towards browner wavelengths...
+
+# save output file
+write_csv(out.grid, "data/outputs/ThielSen_slopes_dwl.csv")
+
+```
+
+
+## Fit bayesian models to determine probability of a trend
+
+```{r}
+# add T/F for stats
+# all lakes
+out.grid$trend <- ifelse(out.grid$sign == "sign.", 1, 0)
+# blueing
+out.grid$decreasing <- ifelse(out.grid$dir == "Decr." & out.grid$sign == "sign.", 1, 0)
+# greening
+out.grid$increasing <- ifelse(out.grid$dir == "Incr." & out.grid$sign == "sign.", 1, 0)
+
+```
+
+
+```{r}
+# fit bayesian model to data sets
+# see this guide for bernoulli distribution: https://bayesball.github.io/BRMS/binomial-modeling.html
+
+# set seed
+set.seed(123)
+
+# all trends
+change.brm <- brm(
+  bf(trend~0 + Intercept), 
+  data = out.grid,
+  family = bernoulli(),
+  prior = c(prior("uniform(-1000, 1000)", lb = -1000, ub = 1000)),
+  file  = "model_files/prob_trend_dwl",
+  chains = 4, iter = 8000, warmup = 1000
+)
+plot(change.brm)
+pp_check(change.brm)
+summary(change.brm)
+# calculate posterior probability
+prob.change <- posterior_samples(change.brm)
+prob.change <- prob.change %>% mutate(p = exp(b_Intercept)/(1 + exp(b_Intercept)))
+quantile(prob.change$p, c(0.025, 0.5, 0.975)); max(prob.change$p); min(prob.change$p)
+hist(prob.change$p)
+
+# greens
+green.brm <- brm(
+  bf(decreasing~0 + Intercept), 
+  data = out.grid,
+  family = bernoulli(),
+  prior = c(prior("uniform(-1000, 1000)", lb = -1000, ub = 1000)),
+  file  = "model_files/prob_trend_dwl_green",
+  chains = 4, iter = 8000, warmup = 1000 
+)
+plot(green.brm)
+pp_check(green.brm)
+summary(green.brm)
+# calculate posterior probability
+prob.green <- posterior_samples(green.brm)
+prob.green <- prob.green %>% mutate(p = exp(b_Intercept)/(1 + exp(b_Intercept)))
+quantile(prob.green$p, c(0.025, 0.5, 0.975))
+hist(prob.green$p)
+
+# browns
+browns.brm <- brm(
+  bf(increasing~0 + Intercept), 
+  data = out.grid,
+  family = bernoulli(),
+  prior = c(prior("uniform(-1000, 1000)", lb = -1000, ub = 1000)),
+  file  = "model_files/prob_trend_dwl_brown",
+  chains = 4, iter = 8000, warmup = 1000 
+)
+plot(browns.brm)
+pp_check(browns.brm)
+summary(browns.brm)
+# calculate posterior probability
+prob.browns <- posterior_samples(browns.brm)
+prob.browns <- prob.browns %>% mutate(p = exp(b_Intercept)/(1 + exp(b_Intercept)))
+quantile(prob.browns$p, c(0.025, 0.5, 0.975))
+hist(prob.browns$p)
+
+# combine draws for posterior probability
+prob.trend <- bind_rows(prob.green, prob.browns)
+prob.trend$dir <- c(rep("Decr.", nrow(prob.green)), rep("Incr.", nrow(prob.browns)))
+# data frame of stats for figure
+prob.stats <- data.frame(
+  value = c(quantile(prob.green$p, c(0.025, 0.5, 0.975)), 
+            quantile(prob.browns$p, c(0.025, 0.5, 0.975))),
+  dir = rep(c("Decr.", "Incr."), each = 3), 
+  cat = rep(c("lwr", "median", "upr"), 2)
+)
+
+# how much more probable is greening vs. browning?
+quantile(prob.green$p, c(0.025, 0.5, 0.975))/quantile(prob.browns$p, c(0.025, 0.5, 0.975))
+
+```
+## Figure of model output/summary
+
+```{r}
+# figure of trends; only showing trends for data including lake color
+trends.data <- merge(limnosat.annual, out.grid, by = "Hylak_id")
+
+# summary trends data
+trends.data %>% filter(trend == 1) %>%  group_by(dir) %>% summarise(median = median(Sen),
+                                                                    min = min(Sen), max = max(Sen),
+                                                                    q025 = quantile(Sen, 0.025),
+                                                                    q975 = quantile(Sen, 0.975))
+
+(fig.trends <- trends.data %>%
+  filter(sign == "sign.") %>%
+  ggplot() + 
+  geom_line(aes(year,dWL, group = Hylak_id, col = dir), alpha = 0.3) + 
+  #facet_wrap(dir~., nrow = 2, ncol = 1) + 
+  scale_color_manual(values = c("Decr." = "forestgreen", "Incr." = "brown")) + 
+  #ggsci::scale_color_jco()  +
+  labs(x = "Year", y = "DWL") + 
+  scale_x_continuous(breaks = c(1990, 2000, 2010, 2019)) + 
+  theme(legend.position = "none"))
+
+(fig.slopes <- trends.data %>%
+  filter(sign == "sign.") %>%
+  ggplot() + 
+  geom_density(aes(Sen, col = dir)) + 
+  geom_vline(aes(xintercept = 0), lty = "dashed") + 
+  scale_color_manual(values = c("Decr." = "forestgreen", "Incr." = "brown")) + 
+  #ggsci::scale_color_jco()  +
+  #facet_wrap(dir~., nrow = 2, ncol = 1) + 
+  labs(x = expression("Sen's slope nm year"^-1), y = "Density", col = NULL) + 
+  theme(legend.position = c(0.2, 0.6)))
+
+(fig.probs <- prob.trend %>%
+  ggplot() + 
+  geom_density(aes(p * 100, col = dir)) + 
+  geom_vline(inherit.aes = F, data = prob.stats, 
+             aes(xintercept = value * 100, col = dir), lty = "dashed") + 
+   scale_color_manual(values = c("Decr." = "forestgreen", "Incr." = "brown")) + 
+  #ggsci::scale_color_jco()  +
+  #facet_wrap(dir~., nrow = 2, ncol = 1) + 
+  theme(legend.position = "none") + 
+  labs(x = "Probability (%)", y = "Density"))
+
+fig.trends.slopes <- ggpubr::ggarrange(
+  plotlist = list(fig.trends, fig.slopes, fig.probs), ncol = 1, nrow = 3, 
+  labels = letters[1:3], align = "hv") #, heights = c(0.3, 0.2, 0.2))
+fig.trends.slopes
+
+ggsave("figures/dwl_thiel_sen_trends.jpg", fig.trends.slopes, width = 3.5, height = 6, dpi = 400)
+
+```
+
+## Lake color over time plot
+
+I was curious how lake color for individual lakes was changing over time and decided to make a large timeseries plot of lake color groups; did this for annual median lake color and monthly values too.
+
+
+Annual median lake color
+
+```{r}
+annual.col <- limnosat.annual[,c("Hylak_id", "year", "dWL")] %>%
+  mutate(color.group = ifelse(dWL <= 495, "Blue", ifelse(dWL >= 560, "Brown", "Green"))) %>%
+  group_by(Hylak_id) %>% mutate(mean.dwl = mean(dWL)) %>% arrange(mean.dwl) %>% # arrange from lowest to highest mean DWL
+  mutate(Hylak_id = as.factor(Hylak_id), Hylak_id = fct_reorder(Hylak_id, mean.dwl))
+# plot color classes
+(annual.chart <- annual.col %>% ggplot(aes(year, Hylak_id, fill = color.group)) + 
+  geom_raster() + scale_fill_manual(values =c ("Blue" = "blue", "Brown" = "brown", "Green" = "forestgreen")) + 
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(), axis.line.y = element_blank()) + 
+  scale_x_continuous() + labs(x = NULL, y = NULL, fill = NULL) + scale_y_discrete(limits = rev))
+
+```
+
+Create same figure for monthly values but only restrict to the lakes for which annual data is available
+
+```{r}
+# load data set and filter
+monthly.col <- read_csv("data/Sandhills_limnosat_no_winter_17Feb25.csv") %>%
+  filter(Hylak_id %in% annual.col$Hylak_id) %>%
+  mutate(Hylak_id = factor(Hylak_id, levels = levels(annual.col$Hylak_id)), month2 = month(date, label = T)) %>%
+  select(Hylak_id, year, month2, dWL) %>%
+  mutate(color.group = ifelse(dWL <= 495, "Blue", ifelse(dWL >= 560, "Brown", "Green")))
+
+(monthly.chart <- monthly.col %>% 
+  ggplot(aes(year, Hylak_id, fill = color.group)) + 
+  geom_raster() + scale_fill_manual(values =c ("Blue" = "blue", "Brown" = "brown", "Green" = "forestgreen")) + 
+  facet_wrap(month2~.) + theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(), axis.line.y = element_blank(), 
+                               panel.margin.x=unit(0.0, "lines") , panel.margin.y=unit(0.0,"lines")) + 
+  scale_x_continuous() + labs(x = NULL, y = NULL, fill = NULL) + scale_y_discrete(limits = rev))
+
+```
+Combine chart
+
+```{r}
+# patch together
+chart <- ggpubr::ggarrange(
+  plotlist = list(annual.chart, monthly.chart), widths = c(3/7, 4/7), align = "hv", ncol = 2, labels = letters[1:2], common.legend = T, legend = "bottom"
+)
+# save
+chart
+ggsave("figures/color_timeseries_chart.jpg", chart, width = 10, height = 5, dpi = 500)
+```
+

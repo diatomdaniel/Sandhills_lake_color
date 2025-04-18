@@ -1,0 +1,89 @@
+---
+title: "Variation and color changes"
+author: "Daniel Gschwentner"
+date: "2025-04-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Code to analyze variation and shifts in lake color for DWL.
+Data is aggregated at annual scale for median DWL and variation in DWL.
+Want to see if greater variation at t-1 preceeds color shift from t-1 to t0, etc.
+
+```{r}
+# libraries
+library(tidyverse)
+library(brms)
+source("code/theme_R.R")
+theme_set(theme)
+```
+
+
+```{r}
+# load data
+col.var <- read_csv("data/Sandhills_limnosat_annual_var_2Apr25.csv")
+```
+```{r}
+# data wrangling
+
+# arrange by site and year
+col.var.ordered <- col.var[order(col.var$Hylak_id, col.var$year), ]
+# calculate lagged DWL (negative values mean t+1 is > than t0)
+lagged <- col.var.ordered %>% group_by(Hylak_id) %>% mutate(lag.median.dwl = lag(median.dwl) - median.dwl)
+
+# code to generate info on transitions
+# Create a column to track the previous class for each site
+col.var.ordered$t_0 <- c(NA, head(col.var.ordered$color.code, -1))
+col.var.ordered$t_1 <- col.var.ordered$color.code
+# numerical indictor indicating switch in lake color
+col.var.ordered$change <- as.numeric(col.var.ordered$t_0 != col.var.ordered$t_1)
+# add lagged dwl back in
+col.var.ordered <- merge(col.var.ordered, lagged[,c("Hylak_id", "year", "lag.median.dwl")], by = c("Hylak_id", "year"))
+# drop NAs
+col.var.ordered <- drop_na(col.var.ordered)
+
+```
+
+```{r}
+# quick figures for overview
+# change in color
+col.var.ordered %>%
+  ggplot() + 
+  geom_point(aes(var.dwl, change)) # not compelling evidence tbh
+
+# mag. of change
+col.var.ordered %>%
+  ggplot() + 
+  geom_point(aes(var.dwl, lag.median.dwl))
+
+```
+
+### Models
+
+```{r}
+# fit model to change in dwl/color
+# all trends
+change.brm <- brm(
+  bf(change~0 + var.dwl), 
+  data = col.var.ordered,
+  family = bernoulli(),
+  prior = c(prior("uniform(-1000, 1000)", lb = -1000, ub = 1000)),
+  chains = 4, iter = 8000, warmup = 1000
+)
+
+change.brm
+summary(change.brm)
+pp_check(change.brm)
+plot(change.brm)
+
+x <- glm(change~ 1 + var.dwl, data = col.var.ordered)
+summary(x)
+coef(x)
+
+summary(lm(lag.median.dwl ~ var.dwl, data = col.var.ordered))
+
+```
+

@@ -1,0 +1,209 @@
+---
+title: "Sandhills LimnoSat lake color synchrony"
+author: "Daniel Gschwentner"
+date: "2024-12-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+lapply(c("tidyverse", "psych"), require, character.only = T)
+source("code/theme_R.r")
+```
+Lake synchrony analysis using (1) Pearson correlation coefficient of unique lake pairs and (2) k-means clustering of unique groups
+
+## Load data
+
+```{r}
+# data
+limnosat.annual <- read_csv("data/Sandhills_limnosat_annual_medians_17Feb25.csv")
+# lakes spatial object
+lakes.sf <- sf::st_read("GIS/sandhill_lakes.gpkg")
+```
+
+```{r}
+# zscore lake DWL per lake
+zcores <- limnosat.annual %>%
+  group_by(Hylak_id) %>% mutate(zscore_dwl = (dWL - mean(dWL))/sd(dWL))
+length(unique(zcores$Hylak_id))
+```
+
+## Synchrony analysis with correlation coefficients
+
+```{r}
+# # determine combination of lake pairs
+# lakes <- unique(zcores$Hylak_id)
+# # Generate all pairwise combinations (size 2)
+# pairwise_matches <- combn(lakes, 2, simplify = TRUE)
+# # Convert to data frame
+# pairwise_df <- as.data.frame(t(pairwise_matches))
+# # Assign column names
+# colnames(pairwise_df) <- c("Lake1", "Lake2")
+# # add empty columns
+# pairwise_df$r <- NA
+# pairwise_df$p <- NA
+# 
+# # for loop
+# time1 <- Sys.time()
+# for(i in 1:nrow(pairwise_df)) {
+#   #print(i)
+#   x <- pairwise_df[i,1]; y <- pairwise_df[i, 2];
+#   x <- pull(zcores[zcores$Hylak_id == x, "zscore_dwl"])
+#   y <- pull(zcores[zcores$Hylak_id == y, "zscore_dwl"])
+#   pearson <- corr.test(x, y, use = "pairwise", method = "pearson", alpha = 0.05)
+#   pairwise_df[i, 3] <- pearson$r; pairwise_df[i, 4] <- pearson$p.adj
+# }
+# time2 <- Sys.time()
+# time2 - time1
+
+# save file
+#write_csv(pairwise_df, "data/outputs/synchrony_dwl_pairwise_correlations.csv")
+pairwise_df <- read_csv("data/outputs/synchrony_dwl_pairwise_correlations.csv")
+
+```
+
+
+## Overview of correlation coefficients
+
+```{r}
+# summary stats of synchrony
+mean(pairwise_df$r) # pretty low synchrony
+mean(pairwise_df[pairwise_df$p < 0.05, "r"]) # better for sign. correlations
+table(pairwise_df$p < 0.05) # majority of correlations were not significant
+```
+## Figure correlation coefficients
+
+```{r}
+# histogram of correlation coefficients (for 117855 lake pairs!!!!)
+(correl.hist <- pairwise_df %>%
+  ggplot() + 
+  geom_histogram(aes(r), binwidth = 0.02, col = "black", fill = "grey60") +
+  geom_vline(xintercept = quantile(pairwise_df$r, c(0.025, 0.5, 0.975)), lty = "dashed") + 
+  labs(x = expression(italic("r")), y = "Count"))
+```
+
+## Correlation coefficients and distance between lakes
+
+GIS wrangling to get spatial object to compute distance matrix
+
+```{r}
+library(sf)
+# cast to sf and assign crs
+lakes.sf <- st_as_sf(distinct(limnosat.annual[,c("Hylak_id", "lon", "lat")]), coords = c("lon", "lat"))
+st_crs(lakes.sf) <- 3857
+```
+Generate distance matrix between lake pairs and wrangle format
+
+```{r}
+# distance matrix of lakes
+dist.matrix <- sf::st_distance(lakes.sf, lakes.sf)
+dist.matrix <- as.data.frame(dist.matrix)
+rownames(dist.matrix) <- lakes.sf$Hylak_id
+colnames(dist.matrix) <- lakes.sf$Hylak_id
+# drop units
+dist.matrix <- units::drop_units(dist.matrix)
+# add id column to pivot
+dist.matrix$Lake1 <- lakes.sf$Hylak_id
+# pivot to long for matching
+dist.matrix.long <- dist.matrix %>%
+  gather("Lake2", "dist_m", -Lake1)
+# drop identical lakes
+dist.matrix.long <- dist.matrix.long %>% filter(dist_m > 0)
+```
+
+Merge distance matrix to correlation matrix
+
+```{r}
+# merge distance matrix with correlation
+pairwise_df <- merge(pairwise_df, dist.matrix.long, by = c("Lake1", "Lake2"), all.x = T, all.y = F)
+# distance lm
+pairwise_df$dist_km <- pairwise_df$dist_m/1000
+```
+
+Simple regression
+(tests H0 that there is no relationship between proximity and synchrony)
+
+```{r}
+# summary of regression
+syn.regression <- lm(r ~ dist_km, data = pairwise_df)
+summary(syn.regression)
+```
+Figure of distance and synchrony
+
+```{r}
+# plot
+(syn.plot <- pairwise_df %>% 
+  ggplot(aes(dist_km, r)) + 
+  geom_point(alpha = 0.1) + 
+  geom_smooth(method = "lm", col = "red") + 
+  labs(x = "Distance (km)", y = expression(italic("r"))) )
+
+```
+Arrange figures for synchrony
+
+```{r}
+
+syn.figures <- ggpubr::ggarrange(
+  plotlist = list(correl.hist, syn.plot), nrow = 1, ncol = 2, 
+  align = "hv", labels = letters[1:2]
+)
+syn.figures
+#ggsave("figures/synchrony_correl_coef.jpg", syn.figures, height = 3, width = 7)
+```
+
+
+## k-means clustering
+See Lottig et al 2019
+
+Data wrangling to wide format
+
+```{r}
+# pivot to wide
+dwl.wide <- limnosat.annual %>% pivot_wider(id_cols = Hylak_id, names_from = year, values_from = dWL)
+```
+
+Determine optimal number of clusters using screeplot or silouhette 
+
+```{r}
+# determine optimal number of clusters with screeplots
+optimal.n <- map_dbl(1:10, ~{kmeans(dplyr::select(dwl.wide, -Hylak_id), ., nstart=50,iter.max = 15 )$tot.withinss})
+plot(1:10, optimal.n) # no clear breakpoint...use Silhouettes
+```
+
+```{r}
+# can find the optimal nr. of clusters using silhouette technique
+# this is actually used in Lottig et al 2017 as well!
+# see https://rpubs.com/abdul_yunus/Kmeans_Clustering
+factoextra::fviz_nbclust(x = dwl.wide[,-1],FUNcluster = kmeans, method = 'silhouette' )
+# okay, 2 major clusters...kinda boring :(
+```
+
+Retrieve cluster information and save output
+
+```{r}
+# cluster analysis
+clusters <- kmeans(dplyr::select(dwl.wide, -Hylak_id), centers = 2)
+clusters$cluster
+```
+
+```{r}
+# match lake-ids with clusters
+cluster.ids <- data.frame(Hylak_id = dwl.wide$Hylak_id, cluster_id = clusters$cluster)
+# save file
+#write_csv(cluster.ids, "data/outputs/k_means_clusters.csv")
+```
+
+```{r}
+# merge with lakes
+lakes.sf <- merge(lakes.sf, cluster.ids, by = "Hylak_id")
+```
+
+
+```{r}
+ggplot() + geom_sf(data = lakes.sf) + geom_sf(data = lakes.sf, aes(col = factor(cluster_id)))
+```

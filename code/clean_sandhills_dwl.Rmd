@@ -1,0 +1,170 @@
+---
+title: "Cleaning Sandhills limnosat data set"
+author: "Daniel Gschwentner"
+date: "2025-12-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+library(tidyverse)
+library(sf)
+library(raster)
+source("code/theme_R.r")
+theme_set(theme)
+```
+
+Select lakes in Sandhills using GIS operations
+
+```{r}
+# load gis layers
+sandhills <- st_read("data/GIS/ne_sandhills.gpkg", layer = "ne_sandhills")
+hydrolakes <- st_read("data/GIS/HydroLAKES.gpkg", layer = "HydroLakes")
+```
+
+```{r}
+# check crs
+st_crs(sandhills); st_crs(hydrolakes)
+# select sandhill lakes
+sandhill.lakes.sf <- st_filter(hydrolakes, sandhills, .predicate = st_within)
+length(unique(sandhill.lakes.sf$Hylak_id))
+# drop geometry for convenient analysis
+sandhill.lakes <- st_drop_geometry(sandhill.lakes.sf)
+# add in cordiates WGS 84 Pseudo Mercator epsg 3857
+sandhill.lakes$lat <- st_coordinates(sandhill.lakes.sf)[,2]
+sandhill.lakes$lon <- st_coordinates(sandhill.lakes.sf)[,1]
+# id cols
+sandhill.id <- sandhill.lakes$Hylak_id
+```
+
+
+```{r}
+# overview of all Sandhill lakes
+overview.all.lakes <- ggplot() + 
+  geom_sf(data = sandhills, col = "black", fill = "white") + 
+  geom_sf(data = sandhill.lakes.sf, size = 1.5, pch = 21, fill = "black", col = "white", lwd = 0.1)
+overview.all.lakes
+```
+
+Load limnosat data
+
+```{r}
+# load limnosat
+limnoSat.us <- read_csv("data/LimnoSat US.csv")
+limnoSat.us$date <- ymd(limnoSat.us$date)
+limnoSat.us$month <- month(limnoSat.us$date)
+```
+
+Filter limnosat data to Sandhills lakes
+
+```{r}
+# filter to sandhills
+limnoSat.sandhills <- limnoSat.us[limnoSat.us$Hylak_id %in% sandhill.id,]
+```
+
+```{r}
+# join to sandhills
+sandhill.lakes <- merge(sandhill.lakes, limnoSat.sandhills, by = "Hylak_id")
+colnames(sandhill.lakes)
+sandhill.lakes <- sandhill.lakes[,c(1, 3, 9, 10, 11, 25, 26, 28,30, 31, 32, 33, 41, 42, 43 )]
+```
+
+Calculate monthly medians
+
+```{r}
+# calulcate sandhill medians; <-- fewer obs which makes computing faster and allows for unique matching of dWL data with climate data
+sandhill.lakes <- sandhill.lakes %>%
+  dplyr::select(-date) %>% # drop original date
+  group_by(Hylak_id, Lake_name, year, month) %>%
+  summarise_all(.funs  = median, na.rm = T) %>%
+  mutate(date = ymd(paste0(year, "/", month, "/01")), 
+         dWL = round(dWL, 0)) %>%
+  filter(year < 2020)
+
+```
+
+Cleaning and filtering
+
+```{r}
+# limit to wavelengths between 475 and 584 nm following Topp et al, and matching to Forel-Ule color scale
+sandhill.lakes <- sandhill.lakes %>% filter(dWL %in% 475:583)
+```
+
+```{r}
+# exclude winter months
+sandhill.lakes.no.winter <- sandhill.lakes %>% filter(month %in% 4:10)
+```
+
+Calculate annual medians
+
+```{r}
+# calculate annual medians; only include lakes with more than 1 observations per year (during ice-free period)
+
+# filter data set to remove lakes with NAs
+annuals.2.keep <- sandhill.lakes.no.winter %>% 
+  group_by(Hylak_id, year) %>% 
+  summarise(n = n()) %>%
+  pivot_wider(id_cols = Hylak_id, names_from = year, values_from = n)
+annuals.2.keep$drop <- rowSums(apply(annuals.2.keep[,-1], 2, is.na))
+annuals.2.keep <- annuals.2.keep[annuals.2.keep$drop == 0, ]
+
+# calculate annual median DWL
+sandhill.lakes.annuals <- sandhill.lakes.no.winter %>%
+  filter(Hylak_id %in% annuals.2.keep$Hylak_id) %>%
+  dplyr::select(c(1:3, 5:14)) %>%
+  group_by(Hylak_id, Lake_name, year) %>%
+  summarise_all(.funs = median)
+
+```
+
+Overview of the nr. of observations per lake
+
+```{r}
+# overview of nr. of observations and lakes per year
+
+# entire data set
+nrow(sandhill.lakes.no.winter); length(unique(sandhill.lakes.no.winter$Hylak_id)); sandhill.lakes.no.winter %>% group_by(Hylak_id) %>% summarise(n = n()) %>% mutate(mean(n),min(n), max(n)) %>% first()
+# trend over time
+obs.over.time <- sandhill.lakes.no.winter %>% group_by(year) %>% summarise(n = n())
+summary(lm(n ~ year, data = obs.over.time));
+(obs.over.time.fig <- obs.over.time %>% ggplot(aes(year, n )) + 
+   geom_line(lwd = 1) + 
+   geom_smooth(method = "lm") + 
+   labs(x = NULL, y = "# observations", subtitle = expression("F"["1, 34"] ~ " = 29.87, p < 0.0001, R^2 = 0.45")))
+
+
+# annual data only
+nrow(sandhill.lakes.annuals); length(unique(sandhill.lakes.annuals$Hylak_id))
+
+```
+
+```{r}
+# save
+# write_csv(sandhill.lakes.no.winter, "data/Sandhills_limnosat_no_winter_17FebDec25.csv")
+# write_csv(sandhill.lakes.annuals, "Sandhills_limnosat_annual_medians_17Feb25.csv")
+# cowplot::save_plot("figures/nr_obs_time.jpg", obs.over.time.fig)
+
+```
+
+```{r}
+# need to calculate variability in lake color for side project/analysis
+all <- read_csv("data/Sandhills_limnosat_no_winter_17Feb25.csv")
+annuals <- read_csv("data/Sandhills_limnosat_annual_medians_17Feb25.csv")
+
+# calculate variation
+var <- all %>% 
+  group_by(Hylak_id, year) %>%
+  summarise(median.dwl = median(dWL),
+            var.dwl = var(dWL), 
+            n = n()) %>%
+  filter(Hylak_id %in% annuals$Hylak_id) %>%
+  mutate(color.code = ifelse(median.dwl < 495, "Blue", ifelse(median.dwl < 560, "Green", "Brown")))
+
+#write_csv(var, "data/Sandhills_limnosat_annual_var_2Apr25.csv")
+```
+
+

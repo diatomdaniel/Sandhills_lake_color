@@ -1,0 +1,76 @@
+---
+title: "Data set overview"
+author: "Daniel Gschwentner"
+date: "2025-02-20"
+output: html_document
+---
+
+
+Code for figures describing the nr. of observations over tiem
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+library(tidyverse)
+source("code/theme_R.r")
+```
+
+## Load data sets
+
+```{r}
+# data
+limnosat <- read_csv("data/Sandhills_limnosat_no_winter_17Feb25.csv") # no winter obs
+length(unique(limnosat$Hylak_id)) # 658 lakes
+```
+
+## Aggregate
+
+Blanket aggregation across all years and months
+
+```{r}
+n.obs <- limnosat %>% mutate(month2 = month(date, label = T)) %>%group_by(year, month2) %>% summarise(n = n()) %>% group_by(year) %>% mutate(ann.sum = sum(n))
+```
+```{r}
+# more of fewer monthly obs?!?!
+(kruskal.test(n ~ month2, data = n.obs)); dunn.test::dunn.test(n.obs$n, n.obs$month2) # well that is great!
+hist(resid(aov(n ~ month2, data = n.obs)))
+# min, mean and max of monthly observations
+n.obs %>% group_by(month2) %>% summarise(min = min(n), mean = mean(n), max = max(n))
+```
+
+
+Aggregate just on monthly basis
+
+```{r}
+
+```
+
+
+## Plot
+
+```{r}
+(n.obs.month.fig <- n.obs %>%
+  ggplot() + 
+  geom_line(aes(year, n, col = month2), lwd = 0.6) + 
+  ggsci::scale_color_jco() + 
+  labs(x = NULL, y = "# observations", col = NULL) + 
+  theme(legend.position = c(0.6, 0.2), legend.direction = "horizontal", legend.background = element_blank()))
+
+(n.obs.ann.fig <- n.obs %>%
+  ggplot() + 
+  geom_line(aes(year, ann.sum), lwd = 0.6) + 
+  labs(x = NULL, y = "# observations", col = NULL))
+
+# arrange
+n.obs.fig <- ggpubr::ggarrange(plotlist = list(n.obs.month.fig, n.obs.ann.fig), nrow = 2, ncol = 1, labels = letters[1:2], align = "hv")
+n.obs.fig
+
+# output
+ggsave("figures/observations_time_series.jpg", n.obs.fig, width = 6, height = 4.5)
+
+```
+

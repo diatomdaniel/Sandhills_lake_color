@@ -1,0 +1,319 @@
+---
+title: "Lake color classification following Lehman et al 2018"
+author: "Daniel Gschwentner"
+date: "2024-11-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+library(tidyverse)
+source("code/theme_R.r")
+```
+
+## Load data sets
+
+```{r}
+# data
+limnosat <- read_csv("data/Sandhills_limnosat_no_winter_17Feb25.csv") # no winter obs
+length(unique(limnosat$Hylak_id)) # 658 lakes
+```
+## Quick description of data set
+
+```{r}
+nrow(limnosat) # 116,485 observations
+limnosat %>% group_by(Hylak_id) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  mutate(median = median(n), min = min(n), max = max(n)) %>% head(n = 1) # median of 194 observations per lake with range of 1 to 240
+
+```
+
+## Color classifications
+
+### All observations
+
+```{r}
+# color classification; see Lehman et al 2018
+color.class <- limnosat %>%
+  mutate(group = ifelse(dWL <= 495, "Blue", 
+                        ifelse(dWL >= 560, "Brown", "Green")))
+table(color.class$group) * 100/nrow(color.class) # wow, over 70% of observations classified as brown
+
+```
+
+### Classification across all observations and years
+Output is number of lakes in a given color class; no blue lakes.
+
+```{r}
+######################## Across all years
+
+# assign to groups
+color.class2 <- color.class %>%
+  # n obs per lake
+  group_by(Hylak_id) %>%
+  mutate(all.n = n()) %>% ungroup() %>%
+  # n group level obs
+  group_by(Hylak_id, group) %>%
+  summarise(n = n(), all.n = mean(all.n)) %>% ungroup() %>%
+  mutate(perc.group = round(n * 100/all.n, 0)) %>%
+  # long to wide
+  pivot_wider(id_cols = Hylak_id, names_from = group, values_from = perc.group) %>%
+  mutate_at(2:4, .funs = function(x) { ifelse(is.na(x), 0, x)}) %>%
+  # classify into color groups
+  mutate(col.group = ifelse(Blue >= 60, "Blue",
+                            ifelse(Brown >= 60, "Brown", 
+                                   ifelse(Green >= 60, "Green", 
+                                          ifelse(Blue >= 40 & Green >= 20, "Blue-green", 
+                                                 ifelse(Green >= 40 & Brown >= 20, "Green-brown",
+                                                        ifelse(Blue >= 40 & Brown >= 20, "Blue-brown", ifelse(Brown >= 40 & Green >= 20, "Brown-green", NA))))))))
+# check NAs
+sum(is.na(color.class2$col.group))
+# classes
+table(color.class2$col.group) # lots of browns and greens!
+
+```
+### Color classes across time
+
+```{r}
+
+######################## Within all years
+
+# assign to groups across years
+color.class2.years <- color.class %>%
+  # n obs per lake
+  group_by(Hylak_id, year) %>%
+  mutate(all.n = n()) %>% ungroup() %>%
+  # n group level obs
+  group_by(Hylak_id, year, group) %>%
+  summarise(n = n(), all.n = mean(all.n)) %>% ungroup() %>%
+  mutate(perc.group = round(n * 100/all.n, 0)) %>%
+  # long to wide
+  pivot_wider(id_cols = c(Hylak_id, year), names_from = group, values_from = perc.group) %>%
+  mutate_at(3:5, .funs = function(x) { ifelse(is.na(x), 0, x)}) %>%
+  # classify into color groups
+  mutate(col.group = ifelse(Blue >= 60, "Blue",
+                            ifelse(Brown >= 60, "Brown", 
+                                   ifelse(Green >= 60, "Green", 
+                                          ifelse(Blue >= 40 & Green >= 20, "Blue-green", 
+                                                 ifelse(Green >= 40 & Brown >= 20, "Green-brown",
+                                                        ifelse(Blue >= 40 & Brown >= 20, "Blue-brown", ifelse(Brown >= 40 & Green >= 20, "Brown-green", ifelse(Green >= 40 & Blue >= 20, "Green-blue", "Blue-brown"))))))))) %>%
+  group_by(year) %>% mutate(n.all = n()) %>% ungroup() %>%
+  group_by(year, col.group) %>% summarise(n = n(), n.all = mean(n.all)) %>% ungroup() %>%
+  mutate(perc_group = n * 100/n.all)
+
+# sanity check
+color.class2.years %>% group_by(year) %>% summarise(total = sum(perc_group)) %>% ggplot() + geom_density(aes(total))
+
+# check overall breakdown
+color.class2.years %>%
+  group_by(col.group) %>%
+  summarise(median = median(perc_group), 
+            min = min(perc_group), 
+            max = max(perc_group)) %>%
+  mutate_at(2:4, round, 2)
+
+```
+
+```{r}
+### plot annual breakdown
+# create legend for color classes
+cols.fill <- c("Blue" = "blue", "Blue-brown" = "blueviolet", "Blue-green" = "slateblue",
+                 "Brown" = "brown", "Brown-green" = "darkorange", 
+               "Green" = "forestgreen", "Green-blue" = "greenyellow", "Green-brown" = "olivedrab")
+# plot groups
+color.groups.year <- color.class2.years %>% 
+  ggplot(aes(year, perc_group, fill = col.group)) + 
+  geom_col() +  # note that nr. of lakes fluctuates annually a little bit; use of percentages helps
+  scale_fill_manual(
+    values = cols.fill
+  ) + 
+  scale_x_continuous(breaks = c(1990, 2000, 2010, 2019)) + 
+  labs(x = NULL, y = "% of lakes", fill = NULL)
+color.groups.year
+
+```
+
+### Color classes by month
+
+```{r}
+
+######################## seasonal
+
+# assign to groups across months
+color.class2.month <- color.class %>%
+  # n obs per lake
+  group_by(Hylak_id, month) %>%
+  mutate(all.n = n()) %>% ungroup() %>%
+  # n group level obs
+  group_by(Hylak_id, month, group) %>%
+  summarise(n = n(), all.n = mean(all.n)) %>% ungroup() %>%
+  mutate(perc.group = round(n * 100/all.n, 0)) %>%
+  # long to wide
+  pivot_wider(id_cols = c(Hylak_id, month), names_from = group, values_from = perc.group) %>%
+  mutate_at(3:5, .funs = function(x) { ifelse(is.na(x), 0, x)}) %>%
+  # classify into color groups
+  mutate(col.group = ifelse(Blue >= 60, "Blue",
+                            ifelse(Brown >= 60, "Brown", 
+                                   ifelse(Green >= 60, "Green", 
+                                          ifelse(Blue >= 40 & Green >= 20, "Blue-green", 
+                                                 ifelse(Green >= 40 & Brown >= 20, "Green-brown",
+                                                        ifelse(Blue >= 40 & Brown >= 20, "Blue-brown", ifelse(Brown >= 40 & Green >= 20, "Brown-green", ifelse(Green >= 40 & Blue >= 20, "Green-blue", "Blue-brown"))))))))) %>%
+  group_by(month) %>% mutate(n.all = n()) %>% ungroup() %>%
+  group_by(month, col.group) %>% summarise(n = n(), n.all = mean(n.all)) %>% ungroup() %>%
+  mutate(perc_group = n * 100/n.all)
+```
+
+```{r}
+
+# plot monthly groups
+color.groups.month <- color.class2.month %>% 
+  ggplot(aes(month, perc_group, fill = col.group)) + 
+  geom_col() +  # note that nr. of lakes fluctuates annually a little bit; use of percentages helps
+  scale_fill_manual(
+    values = cols.fill
+  ) + scale_x_continuous(breaks = c(4:10)) + 
+  labs(x = NULL, y = "% of lakes", fill = NULL)
+color.groups.month
+
+```
+### Trends in green lakes
+
+```{r}
+######################## yearly and monthly
+
+# assign to groups across months
+color.class2.year.month <- color.class %>%
+  # n obs per lake
+  group_by(Hylak_id, year, month) %>%
+  mutate(all.n = n()) %>% ungroup() %>%
+  # n group level obs
+  group_by(Hylak_id, year, month, group) %>%
+  summarise(n = n(), all.n = mean(all.n)) %>% ungroup() %>%
+  mutate(perc.group = round(n * 100/all.n, 0)) %>%
+  # long to wide
+  pivot_wider(id_cols = c(Hylak_id, year, month), names_from = group, values_from = perc.group) %>%
+  mutate_at(4:6, .funs = function(x) { ifelse(is.na(x), 0, x)}) %>%
+  # classify into color groups
+  mutate(col.group = ifelse(Blue >= 60, "Blue",
+                            ifelse(Brown >= 60, "Brown", 
+                                   ifelse(Green >= 60, "Green", 
+                                          ifelse(Blue >= 40 & Green >= 20, "Blue-green", 
+                                                 ifelse(Green >= 40 & Brown >= 20, "Green-brown",
+                                                        ifelse(Blue >= 40 & Brown >= 20, "Blue-brown", ifelse(Brown >= 40 & Green >= 20, "Brown-green", ifelse(Green >= 40 & Blue >= 20, "Green-blue", "Blue-brown"))))))))) %>%
+  group_by(year, month) %>% mutate(n.all = n()) %>% ungroup() %>%
+  group_by(year, month, col.group) %>% summarise(n = n(), n.all = mean(n.all)) %>% ungroup() %>%
+  mutate(perc_group = n * 100/n.all)
+```
+
+```{r}
+# calculate percentage and number of green lakes per month per year
+greens.all.years <- color.class2.year.month %>%
+  mutate(greens = grepl("green", col.group, ignore.case = T)) %>%
+  filter(greens == T)
+
+# nr brown lakes
+browns.all.years <- color.class2.year.month %>%
+  mutate(browns = grepl("brown", col.group, ignore.case = T)) %>%
+  filter(browns == T)
+```
+
+```{r}
+# plot number of green observations across years
+greens.plt <- greens.all.years %>%
+  filter(month %in% 5:8) %>%
+  mutate(month.label = ifelse(month == 5, "May", ifelse(month == 6, "June", ifelse(month == 7, "July", "Aug.")))) %>% mutate(month.label = factor(month.label, levels = c("May", "June", "July", "Aug."))) %>%
+  ggplot(aes(year, perc_group, fill = month.label, col = month.label, pch = month.label)) + 
+  geom_line(lwd = .75) + geom_point(fill = "white", size = 2, stroke = 1) + 
+  scale_x_continuous(breaks = c(1990, 2000, 2010, 2019)) + 
+  labs(x = NULL, y = "% green lakes", fill = NULL, col = NULL, pch = NULL) + 
+  scale_shape_manual(values = c("May" = 21, "June" = 22, "July" = 23, "Aug." = 24)) + 
+  ggsci::scale_fill_jco() + ggsci::scale_color_jco() + 
+  theme(legend.position = c(0.11, 0.9), legend.background = element_rect(colour = NA, fill = NA))
+
+greens.plt
+
+```
+
+## PDSI trends
+
+```{r}
+# pdsi trends
+pdsi <- read_csv("data/PDSI_Ne_GRIDMET.csv") # needs to be aggregated by month and year
+pdsi <- pdsi %>%
+  mutate(year = year(Date), month = month(Date)) %>%
+  filter(year < 2020) %>%
+  mutate(Date = ymd(paste0(year, "-", month, "-01"))) %>%
+  group_by(Date) %>%
+  summarise(PDSI = round(mean(PDSI), 0)) %>%
+  mutate(year = year(Date), month = month(Date))
+
+pdsi.plt <- pdsi %>% ggplot(aes(Date, PDSI)) + geom_line(lwd = .5) + 
+  labs(x = NULL, y = "PDSI") +
+  scale_x_date(breaks = c(ymd("1990/01/01"), ymd("2000-01-01"), ymd("2010-01-01", "2019-01-01")),
+               labels = c("1990", "2000", "2010", "2019"))
+pdsi.plt
+```
+```{r}
+# quick pdsi comparsion for period 2008 - 2019 vs. pre 2008
+pdsi.pre2008 <-  pdsi %>% filter(year<2008); mean(pdsi.pre2008$PDSI)
+pdsi.post2008 <-  pdsi %>% filter(year>=2008); mean(pdsi.post2008$PDSI)
+t.test(pdsi.post2008$PDSI, pdsi.pre2008$PDSI)
+
+```
+
+
+Merge PDSI with green lakes and calculate regression coefficients
+
+```{r}
+# merging green lakes and PDSI
+greens.all.years <- merge(greens.all.years, pdsi, by = c("year", "month"))
+
+greens.all.years %>% ggplot(aes(PDSI, perc_group)) + geom_point()
+
+summary(lm(perc_group ~ PDSI, data = greens.all.years))
+
+cor.obj <- psych::corr.test(greens.all.years$perc_group, greens.all.years$PDSI, method = "pearson", alpha = 0.05)
+cor.obj
+
+
+# merging brown lakes and PDSI
+browns.all.years <- merge(browns.all.years, pdsi, by = c("year", "month"))
+
+browns.all.years %>% ggplot(aes(PDSI, perc_group)) + geom_point()
+
+summary(lm(perc_group ~ PDSI, data = browns.all.years))
+
+cor.obj <- psych::corr.test(browns.all.years$perc_group, browns.all.years$PDSI, method = "pearson", alpha = 0.05)
+cor.obj
+print(cor.obj, short = F)
+
+```
+
+
+
+```{r}
+# combine figures
+col.groups.fig <- ggpubr::ggarrange(
+  plotlist = list(color.groups.year, color.groups.month), 
+  nrow = 1, ncol = 2, align = "hv", common.legend = T, legend = "bottom", labels = letters[1:2]
+)
+col.groups.fig
+col.trends.fig <- ggpubr::ggarrange(
+  plotlist = list(greens.plt, pdsi.plt), 
+  nrow = 1, ncol = 2, align = "hv", common.legend = F, labels = letters[3:4]
+)
+col.trends.fig
+
+# combine all together
+lake.col.figure <- ggpubr::ggarrange(
+  plotlist = list(col.groups.fig, col.trends.fig), common.legend = T,
+  nrow = 2, ncol = 1, heights = c(0.55, 0.45))
+lake.col.figure
+#ggsave("figures/color_classes_all.jpg", lake.col.figure, width = 9, height = 7, dpi = 400)
+```

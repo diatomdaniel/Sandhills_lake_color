@@ -1,0 +1,588 @@
+---
+title: "NARS Water Quality and DWL"
+author: "Daniel Gschwentner"
+date: "2025-02-18"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+lapply(c("tidyverse", "brms", "tidybayes", "lme4", "ggpubr"), require, character.only = T)
+source("code/theme_R.r"); source("code/fui_background.R"); source("code/check_assumptions_custom.R")
+```
+
+## Load data sets 
+
+```{r}
+nars.all <- read_csv("data/nars_usa_dwl.csv")
+nars.sh <- read_csv("data/nars_ne_sandhills_dwl.csv")
+```
+## Differences in water chemistry between Sandhills and USA lakes
+
+Note that a small offset (1^-3) was added to Color Ptco for ANOVA
+
+```{r}
+wq.diff <- nars.all %>% 
+  mutate(SH = ifelse(NA_L3NAME == "Nebraska Sand Hills", "Ne Sandhills", "USA"))
+
+# summary table with mean, median and range
+wq.diff.summary <- wq.diff %>%
+  select(SH, DOC_mgL, COLOR_ptco, TURB_NTU, Chla_ugL, TN_ppm, TP_ppm, COND_uScm) %>%
+  gather("Variable", "Value", -SH) %>%
+  group_by(SH, Variable) %>%
+  summarise(mean = mean(Value),
+            median = median(Value),
+            min = min(Value), 
+            max = max(Value)) %>%
+  mutate_at(3:6, round, 2) %>%
+  mutate(summary_val = paste0(mean, " (", median, "; ", min, " - ", max, ")")) %>%
+  pivot_wider(id_cols = Variable, names_from = SH, values_from = summary_val)
+
+# anovas of log10 transformed data
+aov.doc <- aov(log10(DOC_mgL) ~ SH, data = wq.diff)
+summary(aov.doc)
+aov.color <- aov(log10(COLOR_ptco + 0.001) ~ SH, data = wq.diff)
+summary(aov.color)
+aov.turb <- aov(log10(TURB_NTU) ~ SH, data = wq.diff)
+summary(aov.turb)
+aov.chla <- aov(log10(Chla_ugL) ~ SH, data = wq.diff)
+summary(aov.chla)
+aov.tn <- aov(log10(TN_ppm) ~ SH, data = wq.diff)
+summary(aov.tn)
+aov.tp <- aov(log10(TP_ppm) ~ SH, data = wq.diff)
+summary(aov.tp)
+aov.cond <- aov(log10(COND_uScm) ~ SH, data = wq.diff)
+summary(aov.cond)
+
+# add anova summaries to table
+wq.diff.summary$F_stat <- c(
+  summary(aov.color)[[1]][1,4], summary(aov.cond)[[1]][1,4], summary(aov.chla)[[1]][1,4],
+  summary(aov.doc)[[1]][1,4], summary(aov.tn)[[1]][1,4], summary(aov.tp)[[1]][1,4],
+  summary(aov.turb)[[1]][1,4]
+)
+
+wq.diff.summary$p <- c(
+  summary(aov.color)[[1]][1,5], summary(aov.cond)[[1]][1,5], summary(aov.chla)[[1]][1,5],
+  summary(aov.doc)[[1]][1,5], summary(aov.tn)[[1]][1,5], summary(aov.tp)[[1]][1,5],
+  summary(aov.turb)[[1]][1,5]
+)
+
+wq.diff.summary$df <- "1 on 984"
+
+# order table
+wq.diff.summary$Variable <- factor(wq.diff.summary$Variable, levels = c(
+  "DOC_mgL", "COLOR_ptco", "TURB_NTU", "Chla_ugL", "TN_ppm", "TP_ppm", "COND_uScm"
+))
+
+```
+
+## Regression models
+
+Simple linear regression between water quality parameter and DWL fitted separately for SH and all other ecoregions in the US
+
+Data transformation for regression
+
+```{r}
+nars.all$log10_DOC <- log10(nars.all$DOC_mgL)
+nars.all$log10_Color <- log10(nars.all$COLOR_ptco + 0.001)
+nars.all$log10_Turb <- log10(nars.all$TURB_NTU)
+nars.all$log10_Chla <- log10(nars.all$Chla_ugL)
+nars.all$log10_TN <- log10(nars.all$TN_ppm)
+nars.all$log10_TP <- log10(nars.all$TP_ppm)
+nars.all$log10_Cond <- log10(nars.all$COND_uScm)
+```
+
+
+```{r}
+# separate data sets
+nars.nosh <- nars.all[nars.all$NA_L3NAME != "Nebraska Sand Hills",]
+nars.sh <- nars.all[nars.all$NA_L3NAME == "Nebraska Sand Hills",]
+
+# apply function to retrieve stats for all variables
+regr.stats.usa <- lapply(list("log10_DOC", "log10_Color", "log10_Turb", "log10_Chla", "log10_TN", "log10_TP", "log10_Cond"), function(x) {
+  return(broom::tidy(lm(formula = paste0("dWL ~ ", x), data = nars.nosh)) %>%
+           mutate(rsqr = broom::glance(lm(formula = paste0("dWL ~ ", x), data = nars.nosh))$adj.r.squared,
+                  F_stat = broom::glance(lm(formula = paste0("dWL ~ ", x), data = nars.nosh))$statistic,
+                  df_resid = broom::glance(lm(formula = paste0("dWL ~ ", x), data = nars.nosh))$df.residual))
+}) %>% do.call(rbind, .) %>% mutate(Variable = rep(c("log10_DOC", "log10_Color", "log10_Turb", "log10_Chla", "log10_TN", "log10_TP", "log10_Cond"), each = 2),
+                                    Group = "USA")
+
+regr.stats.nesh <- lapply(list("log10_DOC", "log10_Color", "log10_Turb", "log10_Chla", "log10_TN", "log10_TP", "log10_Cond"), function(x) {
+  return(broom::tidy(lm(formula = paste0("dWL ~ ", x), data = nars.sh)) %>%
+           mutate(rsqr = broom::glance(lm(formula = paste0("dWL ~ ", x), data = nars.sh))$adj.r.squared,
+                  F_stat = broom::glance(lm(formula = paste0("dWL ~ ", x), data = nars.sh))$statistic,
+                  df_resid = broom::glance(lm(formula = paste0("dWL ~ ", x), data = nars.sh))$df.residual))
+}) %>% do.call(rbind, .) %>% mutate(Variable = rep(c("log10_DOC", "log10_Color", "log10_Turb", "log10_Chla", "log10_TN", "log10_TP", "log10_Cond"), each = 2),
+                                    Group = "Ne Sandhills")
+
+# merge tables together
+regr.stats <- rbind(regr.stats.usa, regr.stats.nesh) %>%
+  mutate(term = rep(c("Intercept", "Slope"), 14)) %>%
+  mutate_at(2:3, round, 2) %>%
+  mutate(eff_size = paste0(estimate, " (", std.error, ")")) %>%
+  pivot_wider(id_cols = c(Variable, term), names_from = Group, values_from = c(eff_size, p.value, rsqr, F_stat, df_resid))
+
+# save output
+#write_csv(regr.stats, "data/outputs/dwl_wq_regression_stats.csv")
+
+```
+
+## GAM analysis of DWL and water quality
+
+Analysing relationship between water quality parameters and DWL using GAMs (see Fogarty et al 2020 Sustainability)
+Basically testing to see if the relationship between DWL and water quality is linear or not. Compare GAM to basic regression to see which model is better. If GAM is better, suggests non-linear (saturating!?!) relationship between water quality and DWL
+
+GAM models
+
+```{r}
+library(mgcv)
+
+doc.gam <- gam(dWL ~ s(log10_DOC), data = nars.all); summary(doc.gam);gratia::draw(doc.gam); gratia::appraise(doc.gam) # residuals deviate at high and low end of relationship
+color.gam <- gam(dWL ~ s(log10_Color), data = nars.all); summary(color.gam);gratia::draw(color.gam); gratia::appraise(color.gam) # urggh, really not great relationship here; residuals are doing funky things too!
+turb.gam <- gam(dWL ~ s(log10_Turb), data = nars.all); summary(turb.gam);gratia::draw(turb.gam); gratia::appraise(turb.gam) # pretty good model and shows clear non-linear relationship between TURB and DWL; linear range at intermediate turbidities
+chla.gam <- gam(dWL ~ s(log10_Chla), data = nars.all); summary(chla.gam);gratia::draw(chla.gam); gratia::appraise(chla.gam) # not terrible either, some clear non-linearities
+tn.gam <- gam(dWL ~ s(log10_TN), data = nars.all); summary(tn.gam);gratia::draw(tn.gam); gratia::appraise(tn.gam) # looks okay too
+tp.gam <- gam(dWL ~ s(log10_TP), data = nars.all); summary(tp.gam);gratia::draw(tp.gam); gratia::appraise(tp.gam) # ohhh residuals are very nice
+cond.gam <- gam(dWL ~ s(log10_Cond), data = nars.all); summary(cond.gam);gratia::draw(cond.gam); gratia::appraise(cond.gam) # less great and not super pretty
+
+```
+Linear models of water quality and DWL
+
+```{r}
+lm.doc <- lm(dWL ~ log10_DOC, data = nars.all); summary(lm.doc); check_assumptions(lm.doc) # uhh not the best
+lm.color <- lm(dWL ~ log10_Color, data = nars.all); summary(lm.color); check_assumptions(lm.color) # terrible!
+lm.turb <- lm(dWL ~ log10_Turb, data = nars.all); summary(lm.turb); check_assumptions(lm.turb) # looks pretty good...will be interesting to compare to GAM!
+lm.chla <- lm(dWL ~ log10_Chla, data = nars.all); summary(lm.chla); check_assumptions(lm.chla) # looks pretty good...will be interesting to compare to GAM!
+lm.tn <- lm(dWL ~ log10_TN, data = nars.all); summary(lm.tn); check_assumptions(lm.tn) # some funky residual stuff going on...
+lm.tp <- lm(dWL ~ log10_TP, data = nars.all); summary(lm.tp); check_assumptions(lm.tp) # some funky residual stuff going on...
+lm.cond <- lm(dWL ~ log10_Cond, data = nars.all); summary(lm.cond); check_assumptions(lm.cond) # nope..
+
+
+```
+
+Compare models using MuMIN:AICC
+
+```{r}
+library(MuMIn)
+
+# model list
+mod.list <- list(
+  "doc.gam" = doc.gam, "color.gam" = color.gam, "turb.gam" = turb.gam, "chla.gam" = chla.gam, "tn.gam" = tn.gam, "tp.gam" = tp.gam, "cond.gam" = cond.gam,
+  "doc.lm" = lm.doc, "color.lm" = lm.color, "turb.lm" = lm.turb, "chla.lm" = lm.chla, "tn.lm" = lm.tn, "tp.lm" = lm.tp, "cond.lm" = lm.cond
+)
+
+model.sel(mod.list, rank = "AICc")
+
+# save file
+mod.selection.table <- model.sel(mod.list, rank = "AICc") %>% as_data_frame()
+write_csv(x = mod.selection.table, file = "data/outputs/DWL_WQ_model_selection_raw.csv")
+
+# GAMS outperform linear models across the board. Turbidity is by far the best predictor variable (which makes sense)
+```
+
+
+## Figure of DWL and water quality parameters
+
+Data transformation and formatting
+```{r}
+wq.diff$log10_DOC <- log10(wq.diff$DOC_mgL)
+wq.diff$log10_Color <- log10(wq.diff$COLOR_ptco + 0.001)
+wq.diff$log10_Turb <- log10(wq.diff$TURB_NTU)
+wq.diff$log10_Chla <- log10(wq.diff$Chla_ugL)
+wq.diff$log10_TN <- log10(wq.diff$TN_ppm)
+wq.diff$log10_TP <- log10(wq.diff$TP_ppm)
+wq.diff$log10_Cond <- log10(wq.diff$COND_uScm)
+
+# long format
+wq.diff.long <- wq.diff %>%
+  select(log10_DOC, log10_Color, log10_Turb, log10_Chla, log10_TN, log10_TP, log10_Cond, SH, dWL) %>%
+  gather("Variable", "Value", -SH, -dWL) %>%
+  mutate(Variable = factor(Variable, levels = c(
+    "log10_DOC", "log10_Color", "log10_Turb", "log10_Chla", "log10_TN", "log10_TP", "log10_Cond"
+  )))
+
+```
+
+
+Figure
+
+```{r}
+(dwl.wq.summary <- wq.diff.long %>%
+  ggplot() + 
+  geom_point(aes(Value, dWL, pch = SH, fill = SH), size = 1) + 
+  geom_smooth(method = "lm", aes(Value, dWL, group = SH, lty = SH), col = "black") +
+  scale_shape_manual(values = c("Ne Sandhills" = 21, "USA" = 21)) + scale_fill_manual(values = c("Ne Sandhills" = "black", "USA" = "white")) + 
+  facet_wrap(Variable~., scales = "free_x", ncol = 2) + 
+  labs(y = "DWL", fill = NULL, pch = NULL, lty = NULL))
+
+#ggsave("figures/nars_dwl_wq.jpg", dwl.wq.summary)
+```
+## Create figures
+
+```{r}
+
+(doc <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(ymin = dWL, ymax = dWL + 1, xmin = -Inf, xmax = Inf , fill = col), alpha = 0.8) + scale_fill_identity() +  
+  geom_point(data = nars.all, aes(y = dWL, x = log10(DOC_mgL), col = "USA"), size = 1, pch = 17) + 
+  geom_point(data = nars.sh, aes(y = dWL, x = log10(DOC_mgL), col = "Ne Sandhills"),  size = 2, pch = 16) + 
+  geom_smooth(method = "lm", data = nars.all, aes(y = dWL, x = log10(DOC_mgL)), lty = "dashed", col = "black") + 
+  geom_smooth(method = "lm", data = nars.sh, aes(y = dWL, x = log10(DOC_mgL)), lty = "solid", col = "red") + 
+  scale_color_manual(values = c("USA" = "black", "Ne Sandhills" = "red")) + 
+  #scale_y_continuous(limits = c(440, 600)) + 
+  labs(y = "DWL", x = expression("log"[10] ~ "(DOC mg L"^-1 ~ ")"), col = NULL))
+
+(color <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(ymin = dWL, ymax = dWL + 1, xmin = -Inf, xmax = Inf , fill = col), alpha = 0.8) + scale_fill_identity() +  
+  geom_point(data = nars.all, aes(y = dWL, x = log10(COLOR_ptco + 0.001), col = "USA"), size = 1, pch = 17) + 
+  geom_point(data = nars.sh, aes(y = dWL, x = log10(COLOR_ptco + 0.001), col = "Ne Sandhills"), size = 2, pch = 16) + 
+  geom_smooth(method = "lm", data = nars.all, aes(y = dWL, x = log10(COLOR_ptco)), lty = "dashed", col = "black") + 
+  geom_smooth(method = "lm", data = nars.sh, aes(y = dWL, x = log10(COLOR_ptco)), lty = "solid", col = "red") + 
+  scale_color_manual(values = c("USA" = "black", "Ne Sandhills" = "red")) + 
+  #scale_y_continuous(limits = c(440, 600)) + 
+  labs(y = "DWL", x = expression("log"[10] ~ "(Color PtCo)"), col = NULL))
+
+(turb <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(ymin = dWL, ymax = dWL + 1, xmin = -Inf, xmax = Inf , fill = col), alpha = 0.8) + scale_fill_identity() +  
+  geom_point(data = nars.all, aes(y = dWL, x = log10(TURB_NTU), col = "USA"), size = 1, pch = 17) + 
+  geom_point(data = nars.sh, aes(y = dWL, x = log10(TURB_NTU), col = "Ne Sandhills"), size = 2, pch = 16) + 
+  geom_smooth(method = "lm", data = nars.all, aes(y = dWL, x = log10(TURB_NTU)), lty = "dashed", col = "black") + 
+  geom_smooth(method = "lm", data = nars.sh, aes(y = dWL, x = log10(TURB_NTU)), lty = "solid", col = "red") + 
+   scale_color_manual(values = c("USA" = "black", "Ne Sandhills" = "red")) + 
+  #scale_y_continuous(limits = c(440, 600)) + 
+  labs(y = "DWL", x = expression("log"[10] ~ "(Turbidity NTU)"), col = NULL))
+
+(chla <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(ymin = dWL, ymax = dWL + 1, xmin = -Inf, xmax = Inf , fill = col), alpha = 0.8) + scale_fill_identity() +  
+  geom_point(data = nars.all, aes(y = dWL, x = log10(Chla_ugL), col = "USA"), size = 1, pch = 17) + 
+  geom_point(data = nars.sh, aes(y = dWL, x = log10(Chla_ugL), col = "Ne Sandhills"), size = 2, pch = 16) + 
+  geom_smooth(method = "lm", data = nars.all, aes(y = dWL, x = log10(Chla_ugL)), lty = "dashed", col = "black") + 
+  geom_smooth(method = "lm", data = nars.sh, aes(y = dWL, x = log10(Chla_ugL)), lty = "solid", col = "red") + 
+  scale_color_manual(values = c("USA" = "black", "Ne Sandhills" = "red")) + 
+  #scale_y_continuous(limits = c(440, 600)) + 
+  labs(y = "DWL", x = expression("log"[10] ~ "(Chla" ~ mu ~ "g L"^-1 ~ ")" ), col = NULL))
+
+(tn <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(ymin = dWL, ymax = dWL + 1, xmin = -Inf, xmax = Inf , fill = col), alpha = 0.8) + scale_fill_identity() +  
+  geom_point(data = nars.all, aes(y = dWL, x = log10(TN_ppm), col = "USA"), size = 1, pch = 17) + 
+  geom_point(data = nars.sh, aes(y = dWL, x = log10(TN_ppm), col = "Ne Sandhills"), size = 2, pch = 16) + 
+  geom_smooth(method = "lm", data = nars.all, aes(y = dWL, x = log10(TN_ppm)), lty = "dashed", col = "black") + 
+  geom_smooth(method = "lm", data = nars.sh, aes(y = dWL, x = log10(TN_ppm)), lty = "solid", col = "red") + 
+   scale_color_manual(values = c("USA" = "black", "Ne Sandhills" = "red")) + 
+  #scale_y_continuous(limits = c(440, 600)) + 
+  labs(y = "DWL", x = expression("log"[10] ~ "(TN mg L"^-1 ~ ")" ), col = NULL))
+
+(tp <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(ymin = dWL, ymax = dWL + 1, xmin = -Inf, xmax = Inf , fill = col), alpha = 0.8) + scale_fill_identity() +  
+  geom_point(data = nars.all, aes(y = dWL, x = log10(TP_ppm), col = "USA"), size = 1, pch = 17) + 
+  geom_point(data = nars.sh, aes(y = dWL, x = log10(TP_ppm), col = "Ne Sandhills"), size = 2, pch = 16) + 
+  geom_smooth(method = "lm", data = nars.all, aes(y = dWL, x = log10(TP_ppm)), lty = "dashed", col = "black") + 
+  geom_smooth(method = "lm", data = nars.sh, aes(y = dWL, x = log10(TP_ppm)), lty = "solid", col = "red") + 
+   scale_color_manual(values = c("USA" = "black", "Ne Sandhills" = "red")) + 
+  #scale_y_continuous(limits = c(440, 600)) + 
+  labs(y = "DWL", x = expression("log"[10] ~ "(TP mg L"^-1 ~ ")" ), col = NULL))
+
+(cond <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(ymin = dWL, ymax = dWL + 1, xmin = -Inf, xmax = Inf , fill = col), alpha = 0.8) + scale_fill_identity() +  
+  geom_point(data = nars.all, aes(y = dWL, x = log10(COND_uScm), col = "USA"), size = 1, pch = 17) + 
+  geom_point(data = nars.sh, aes(y = dWL, x = log10(COND_uScm), col = "Ne Sandhills"), size = 2, pch = 16) + 
+  geom_smooth(method = "lm", data = nars.all, aes(y = dWL, x = log10(COND_uScm)), lty = "dashed", col = "black") + 
+  geom_smooth(method = "lm", data = nars.sh, aes(y = dWL, x = log10(COND_uScm)), lty = "solid", col = "red") + 
+  scale_color_manual(values = c("USA" = "black", "Ne Sandhills" = "red")) +
+  #scale_y_continuous(limits = c(440, 600)) + 
+  labs(y = "DWL", x = expression("log"[10] ~ "(Sp. Conductivity" ~ mu ~ "S cm"^-1 ~ ")" ), col = NULL))
+
+
+dwl.wq.summary <- ggpubr::ggarrange(
+  plotlist = list(doc, color, turb, chla, tn, tp, cond),
+  align = "hv", ncol = 2, nrow = 4, common.legend = T,
+  legend = "bottom", labels = letters[1:7]
+)
+dwl.wq.summary
+#ggsave("figures/nars_dwl_wq.jpg", dwl.wq.summary, width = 6, height = 7)
+
+```
+
+Facet plot version of the above
+
+```{r}
+# data prep
+nars.all$log10_DOC <- log10(nars.all$DOC_mgL)
+nars.all$log10_Color <- log10(nars.all$COLOR_ptco + 0.001)
+nars.all$log10_Turb <- log10(nars.all$TURB_NTU)
+nars.all$log10_Chla <- log10(nars.all$Chla_ugL)
+nars.all$log10_TN <- log10(nars.all$TN_ppm)
+nars.all$log10_TP <- log10(nars.all$TP_ppm)
+nars.all$log10_Cond <- log10(nars.all$COND_uScm)
+
+# long format
+nars.all.long <- nars.all %>%
+  select(log10_DOC, log10_Color, log10_Turb, log10_Chla, log10_TN, log10_TP, log10_Cond, dWL) %>%
+  gather("Variable", "Value", -dWL) %>%
+  mutate(Variable = factor(Variable, levels = c(
+    "log10_DOC", "log10_Color", "log10_Turb", "log10_Chla", "log10_TN", "log10_TP", "log10_Cond"
+  )))
+
+nars.sh$log10_DOC <- log10(nars.sh$DOC_mgL)
+nars.sh$log10_Color <- log10(nars.sh$COLOR_ptco + 0.001)
+nars.sh$log10_Turb <- log10(nars.sh$TURB_NTU)
+nars.sh$log10_Chla <- log10(nars.sh$Chla_ugL)
+nars.sh$log10_TN <- log10(nars.sh$TN_ppm)
+nars.sh$log10_TP <- log10(nars.sh$TP_ppm)
+nars.sh$log10_Cond <- log10(nars.sh$COND_uScm)
+
+# long format
+nars.sh.long <- nars.sh %>%
+  select(log10_DOC, log10_Color, log10_Turb, log10_Chla, log10_TN, log10_TP, log10_Cond, dWL) %>%
+  gather("Variable", "Value", -dWL) %>%
+  mutate(Variable = factor(Variable, levels = c(
+    "log10_DOC", "log10_Color", "log10_Turb", "log10_Chla", "log10_TN", "log10_TP", "log10_Cond"
+  )))
+
+
+```
+
+```{r}
+#
+
+quantiles <- nars.all.long %>% group_by(Variable) %>% summarise(q = quantile(Value, 0.95))
+
+dwl.wq.summary2 <- ggplot() + 
+  #geom_rect(data = fui.lookup, aes(ymin = dWL, ymax = dWL + 1, xmin = -Inf, xmax = Inf , fill = col), alpha = 0.8) + scale_fill_identity() +  
+  geom_point(data = nars.all.long, aes(Value, dWL, col = "USA"), pch = 1, alpha = 1, stroke = 0.6) + 
+  geom_smooth(data = nars.all.long, method = "gam", aes(Value, dWL), col = "black", fill = "red", alpha = 0.3) + 
+  geom_point(data = nars.sh.long, aes(Value, dWL, col = "Ne Sandhills"), pch = 21, fill = "black") + 
+  #geom_vline(data = quantiles, aes(xintercept = q), lty = "dashed") + 
+  #geom_smooth(data = nars.sh.long, method = "lm", aes(Value, dWL, lty = "Ne Sandhills"), col = "black") + 
+  #scale_y_continuous(limits = c(480, 575)) + 
+  scale_color_manual(values = c("Ne Sandhills" = "black", "USA" = "grey")) + 
+  scale_linewidth_manual(values = c("Ne Sandhills" = "solid", "USA" = "dashed")) + 
+  facet_wrap(Variable~.,, scales = "free_x", ncol = 4) + 
+  labs(x = expression("log"[10] ~ " (Value)"), y = "DWL", col = NULL, linetype = NULL, fill = NULL)
+  
+dwl.wq.summary2
+#ggsave("figures/nars_dwl_wq2.jpg", dwl.wq.summary2, width = 7, height = 4.5)
+
+```
+
+### PCA of NARS WQ data
+
+```{r}
+library(vegan)
+# all variables including green and blue lakes
+wq.scaled <- decostand(nars.all[,c(8:14)], "hellinger", 2)
+# run pca
+wq.pca <- rda(wq.scaled, scale = F)
+summary(wq.pca)
+plot(wq.pca)
+
+(eigenvals(wq.pca)) * 100/sum(eigenvals(wq.pca))
+# scores
+species <- scores(wq.pca)$species %>% as.data.frame()
+species$species <- rownames(species)
+sites <- scores(wq.pca)$sites %>% as.data.frame()
+
+# add color classification
+sites$color.group <- ifelse(nars.all$dWL <= 495, "Blue", ifelse(nars.all$dWL >= 560, "Brown", "Green"))
+sites$color.group <- factor(sites$color.group, levels = c("Blue", "Green", "Brown"))
+
+```
+```{r}
+# anova site scores for lake color groups
+hist(resid(aov(PC1 ~ color.group, data = sites)))
+summary(aov(PC1 ~ color.group, data = sites))
+TukeyHSD(aov(PC1 ~ color.group, data = sites))
+
+hist(resid(aov(PC2 ~ color.group, data = sites)))
+summary(aov(PC2 ~ color.group, data = sites))
+TukeyHSD(aov(PC2 ~ color.group, data = sites))
+
+```
+
+
+```{r}
+# plot
+(ord.plot <- ggplot() + 
+  geom_hline(yintercept = 0, lty = "dashed") + geom_vline(xintercept = 0, lty = "dashed") + 
+  geom_point(data = sites, aes(PC1, PC2, col = color.group), alpha = 0.5) + 
+  geom_segment(data = species, aes(x = 0, y = 0, xend = PC1, yend = PC2),
+               arrow = arrow(type = "open", length = unit(0.1, "centimeters"))) +
+    ggrepel::geom_text_repel(data = species, aes(x = PC1, y = PC2, label = species)) + 
+   scale_color_manual(values =c ("Blue" = "blue", "Brown" = "brown", "Green" = "forestgreen")) + 
+  labs(x = "PCA1 (55%)", y = "PCA2 (20%)", col = NULL))
+
+(pca1 <- ggplot() + 
+  geom_boxplot(data = sites, aes(color.group, PC1)) + 
+  geom_text(aes(x = "Blue", y = 0.1, label = "a")) + 
+  geom_text(aes(x = "Green", y = 0.1, label = "b")) + 
+  geom_text(aes(x = "Brown", y = 0.1, label = "c")) + 
+  labs(x = NULL, y = "PCA axis 1 scores"))
+
+(pca2 <- ggplot() + 
+  geom_boxplot(data = sites, aes(color.group, PC2)) + 
+  geom_text(aes(x = "Blue", y = 0.4, label = "a")) + 
+  geom_text(aes(x = "Green", y = 0.4, label = "a")) + 
+  geom_text(aes(x = "Brown", y = 0.4, label = "b")) + 
+  labs(x = NULL, y = "PCA axis 2 scores"))
+
+## arrange figs
+# pca.boxplots <- ggpubr::ggarrange(plotlist = list(pca1, pca2), align = "hv", nrow = 2, letters = c("b", "c"))
+# ord.plot2 <- ggpubr::ggarrange(plotlist = list(ord.plot, pca.boxplots),nrow = 1, ncol = 2, letters = c("a", ""), widths = c(2/3, 1/3))
+# ord.plot2
+ggsave("figures/ordination_water_quality.jpg", ord.plot, width = 4, height = 4)
+```
+
+### Comparison of WQ parameters in blue, green and brown lakes
+
+```{r}
+# prepare data
+nars.wq.groups <- nars.all %>% select(dWL, COLOR_ptco, DOC_mgL, TURB_NTU, Chla_ugL, TN_ppm,TP_ppm, COND_uScm)
+nars.wq.groups$color.group <- ifelse(nars.wq.groups$dWL <= 495, "Blue", ifelse(nars.all$dWL >= 560, "Brown", "Green"))
+nars.wq.groups$color.group <- factor(nars.wq.groups$color.group, levels = c("Blue", "Green", "Brown"))
+
+```
+
+
+```{r}
+# run anovas
+# doc
+summary(aov(log10(DOC_mgL) ~ color.group, data = nars.wq.groups))
+TukeyHSD(aov(log10(DOC_mgL) ~ color.group, data = nars.wq.groups))
+
+# color
+summary(aov(log10(COLOR_ptco + 0.001) ~ color.group, data = nars.wq.groups))
+TukeyHSD(aov(log10(COLOR_ptco + 0.001) ~ color.group, data = nars.wq.groups))
+
+# turbidity
+summary(aov(log10(TURB_NTU) ~ color.group, data = nars.wq.groups))
+TukeyHSD(aov(log10(TURB_NTU) ~  color.group, data = nars.wq.groups))
+
+# Chla
+summary(aov(log10(Chla_ugL) ~ color.group, data = nars.wq.groups))
+TukeyHSD(aov(log10(Chla_ugL) ~  color.group, data = nars.wq.groups))
+
+# TN
+summary(aov(log10(TN_ppm) ~ color.group, data = nars.wq.groups))
+TukeyHSD(aov(log10(TN_ppm) ~  color.group, data = nars.wq.groups))
+
+# TP
+summary(aov(log10(TP_ppm) ~ color.group, data = nars.wq.groups))
+TukeyHSD(aov(log10(TP_ppm) ~  color.group, data = nars.wq.groups))
+
+# Conductivity
+summary(aov(log10(COND_uScm) ~ color.group, data = nars.wq.groups))
+TukeyHSD(aov(log10(COND_uScm) ~  color.group, data = nars.wq.groups))
+
+
+```
+```{r}
+# create boxplots of figures
+
+# doc
+(doc.groups <- nars.wq.groups %>% 
+  ggplot() + geom_boxplot(aes(color.group, fill = color.group, log10(DOC_mgL))) + 
+  annotate(geom = "text", x = "Blue", y = 3, label = "a") + 
+  annotate(geom = "text", x = "Green", y = 3, label = "b") + 
+  annotate(geom = "text", x = "Brown", y = 3, label = "c") + 
+  labs(x = NULL, y = expression("log"[10] ~ "(DOC mg L"^-1 ~ ")"), fill = NULL) + 
+  scale_fill_manual(values = c("Blue" = "blue", "Green" = "forestgreen", "Brown" = "brown")) + 
+  theme(legend.position = "none")
+)
+
+# lake color
+(col.groups <- nars.wq.groups %>% 
+  ggplot() + geom_boxplot(aes(color.group, fill = color.group, log10(COLOR_ptco + 0.01))) + 
+  annotate(geom = "text", x = "Blue", y = 4, label = "a") + 
+  annotate(geom = "text", x = "Green", y = 4, label = "a") + 
+  annotate(geom = "text", x = "Brown", y = 4, label = "b") + 
+  labs(x = NULL, y = expression("log"[10] ~ "(Color PtCo + 0.001)"), fill = NULL) + 
+  scale_fill_manual(values = c("Blue" = "blue", "Green" = "forestgreen", "Brown" = "brown")) + 
+  theme(legend.position = "none")
+)
+
+# Turbidity
+(turb.groups <- nars.wq.groups %>% 
+  ggplot() + geom_boxplot(aes(color.group, fill = color.group, log10(TURB_NTU))) + 
+  annotate(geom = "text", x = "Blue", y = 3, label = "a") + 
+  annotate(geom = "text", x = "Green", y = 3, label = "b") + 
+  annotate(geom = "text", x = "Brown", y = 3, label = "c") + 
+  labs(x = NULL, y = expression("log"[10] ~ "(Turbidity NTU)"), fill = NULL) + 
+  scale_fill_manual(values = c("Blue" = "blue", "Green" = "forestgreen", "Brown" = "brown")) + 
+  theme(legend.position = "none")
+)
+
+# Chla
+(chla.groups <- nars.wq.groups %>% 
+  ggplot() + geom_boxplot(aes(color.group, fill = color.group, log10(Chla_ugL))) + 
+  annotate(geom = "text", x = "Blue", y = 3, label = "a") + 
+  annotate(geom = "text", x = "Green", y = 3, label = "b") + 
+  annotate(geom = "text", x = "Brown", y = 3, label = "c") + 
+  labs(x = NULL, y = expression("log"[10] ~ "(Chla ug L"^-1 ~ ")"), fill = NULL) + 
+  scale_fill_manual(values = c("Blue" = "blue", "Green" = "forestgreen", "Brown" = "brown")) + 
+  theme(legend.position = "none")
+)
+
+# TN
+(tn.groups <- nars.wq.groups %>% 
+  ggplot() + geom_boxplot(aes(color.group, fill = color.group, log10(TN_ppm))) + 
+  annotate(geom = "text", x = "Blue", y = 2, label = "a") + 
+  annotate(geom = "text", x = "Green", y = 2, label = "b") + 
+  annotate(geom = "text", x = "Brown", y = 2, label = "c") + 
+  labs(x = NULL, y = expression("log"[10] ~ "(TN mg L"^-1 ~ ")"), fill = NULL) + 
+  scale_fill_manual(values = c("Blue" = "blue", "Green" = "forestgreen", "Brown" = "brown")) + 
+  theme(legend.position = "none")
+)
+
+# TP
+(tp.groups <- nars.wq.groups %>% 
+  ggplot() + geom_boxplot(aes(color.group, fill = color.group, log10(TP_ppm))) + 
+  annotate(geom = "text", x = "Blue", y = 2, label = "a") + 
+  annotate(geom = "text", x = "Green", y = 2, label = "b") + 
+  annotate(geom = "text", x = "Brown", y = 2, label = "c") + 
+  labs(x = NULL, y = expression("log"[10] ~ "(TP mg L"^-1 ~ ")"), fill = NULL) + 
+  scale_fill_manual(values = c("Blue" = "blue", "Green" = "forestgreen", "Brown" = "brown")) + 
+  theme(legend.position = "none")
+)
+
+# Conductivity
+(cond.groups <- nars.wq.groups %>% 
+  ggplot() + geom_boxplot(aes(color.group, fill = color.group, log10(COND_uScm))) + 
+  annotate(geom = "text", x = "Blue", y = 5, label = "a") + 
+  annotate(geom = "text", x = "Green", y = 5, label = "b") + 
+  annotate(geom = "text", x = "Brown", y = 5, label = "c") + 
+  labs(x = NULL, y = expression("log"[10] ~ "(Cond. uS cm"^-1 ~")"), fill = NULL) + 
+  scale_fill_manual(values = c("Blue" = "blue", "Green" = "forestgreen", "Brown" = "brown")) + 
+  theme(legend.position = "none")
+)
+
+# arrange
+col.groups.fig <- ggpubr::ggarrange(
+  plotlist = list(doc.groups, col.groups, turb.groups, chla.groups, tn.groups, tp.groups, cond.groups),
+  align = "hv", ncol = 4, nrow = 2, labels = letters[1:7]
+)
+col.groups.fig
+
+# save
+cowplot::save_plot("figures/CPAS_color_groups.png", col.groups.fig, base_height = 5, base_width = 9)
+```
+### Trophic state and DWL
+
+```{r}
+# set trophic states from Wetzel's limnology
+trophic.states <- nars.all %>% 
+  select(dWL, TP_ppm) %>%
+  mutate(trophic = ifelse(TP_ppm * 1000 < 10, "Oligo.", ifelse(TP_ppm * 1000 > 30, "Eutro.", "Meso."))) %>%
+  mutate(trophic = factor(trophic, levels = c("Oligo.", "Meso.", "Eutro.")))
+
+# anova
+summary(aov(dWL ~ trophic, data = trophic.states))
+TukeyHSD(aov(dWL ~ trophic, data = trophic.states))
+
+# boxplot
+trophic.states %>% ggplot() + geom_boxplot(aes(trophic, dWL))
+trophic.states %>% group_by(trophic) %>% summarise(mean(dWL))
+```
+

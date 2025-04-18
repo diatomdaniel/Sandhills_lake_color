@@ -1,0 +1,116 @@
+---
+title: "Annual LimnoSat PRISM climate"
+author: "Daniel Gschwentner"
+date: "2025-02-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+lapply(c("tidyverse", "sf", "raster", "prism"), require, character.only = T)
+source("code/theme_R.r")
+```
+
+## Load data sets
+
+```{r}
+# load data
+limnosat.annual <- read_csv("data/Sandhills_limnosat_annual_medians_17Feb25.csv") # only keep Hydro_id, year, dWL
+sandhills.lakes <- st_read("data/GIS/sandhill_lakes.gpkg", layer = "sandhill_lakes") %>%
+  filter(Hylak_id %in% limnosat.annual$Hylak_id)
+```
+
+```{r }
+# load prism data with prism package
+# # load temp data
+# get_prism_annual(type = "tmean", year = 1984:2020, keepZip = F)
+# # load ppt data
+# get_prism_annual(type = "ppt", year = 1984:2020, keepZip = F)
+# manually downloaded elevation data
+
+# manually copy to GIS folder
+
+```
+
+```{r }
+# load and stack mtemp data
+# filter paths
+mtemp <- list.files("data/GIS/ann_temp", full.names = T, recursive = T)
+mtemp <- mtemp[grepl("_bil.bil", mtemp)]
+mtemp <- mtemp[!grepl(".aux.xml", mtemp)]
+
+# create date vector
+mtemp.dates <- 1984:2020
+
+# stack
+mtemp.stack <- stack(mtemp)
+```
+
+
+```{r }
+# load and stack ppt data
+# filter paths
+ppt <- list.files("data/GIS/ann_ppt", full.names = T, recursive = T)
+ppt <- ppt[grepl("_bil.bil", ppt)]
+ppt <- ppt[!grepl(".aux.xml", ppt)]
+
+# create date vector
+ppt.dates <- 1984:2020
+
+# stack
+ppt.stack <- stack(ppt)
+```
+
+```{r }
+# sample raster stacks
+# mtemp
+mtemp.samples <- extract(mtemp.stack, sandhills.lakes)
+mtemp.samples <- as.data.frame(mtemp.samples)
+colnames(mtemp.samples) <- mtemp.dates
+mtemp.samples$Hylak_id <- sandhills.lakes$Hylak_id
+mtemp.samples <- gather(mtemp.samples, "year", "ann_temp_C", -Hylak_id)
+# ppt
+ppt.samples <- extract(ppt.stack, sandhills.lakes)
+ppt.samples <- as.data.frame(ppt.samples)
+colnames(ppt.samples) <- ppt.dates
+ppt.samples$Hylak_id <- sandhills.lakes$Hylak_id
+ppt.samples <- gather(ppt.samples, "year", "ppt_mm", -Hylak_id)
+# elevation
+elev <- raster("data/GIS/PRISM_us_dem_4km_bil/PRISM_us_dem_4km_bil.bil")
+elev.samples <- extract(elev, sandhills.lakes)
+elev.samples <- as.data.frame(elev.samples)
+colnames(elev.samples) <- "elev_m"
+elev.samples$Hylak_id <- sandhills.lakes$Hylak_id
+
+# bind all climate data together
+climate.all <- merge(elev.samples, ppt.samples, by = "Hylak_id")
+climate.all <- merge(climate.all, mtemp.samples, by = c("Hylak_id", "year"))
+```
+
+```{r}
+# merge with limnosat data
+limnosat.annual.climate <- merge(limnosat.annual, climate.all, by = c("Hylak_id", "year"))
+```
+
+```{r}
+# add in lake area
+lake.area <- sandhills.lakes %>% dplyr::select(Hylak_id, lake_area_km2 = Lake_area) %>% st_drop_geometry()
+limnosat.annual.climate <- merge(limnosat.annual.climate, lake.area, by = "Hylak_id")
+```
+
+
+```{r}
+hist(limnosat.annual.climate$dWL, main = "DWL"); hist(limnosat.annual.climate$ppt_mm, main = "PPT mm"); hist(limnosat.annual.climate$ann_temp_C, main = "Temp C"); hist(limnosat.annual.climate$elev_m, main = "Elev. m"); hist(limnosat.annual.climate$lake_area_km2, main = "Lake area km2")
+```
+```{r}
+# save
+#write_csv(limnosat.annual.climate, "data/Sandhills_limnosat_annual_medians_climate_18Feb25.csv")
+```
+
+
+

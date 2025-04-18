@@ -1,0 +1,231 @@
+---
+title: "Cleaning NARs data for color assessment"
+author: "Daniel Gschwentner"
+date: "2025-02-18"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+library(tidyverse)
+library(sf)
+source("code/theme_R.r")
+```
+
+## Clean and merge NARS files
+
+```{r}
+# list files and load
+files <- list.files("data/NARS/", full.names = T, pattern = ".csv")
+files
+
+nars12 <- read_csv(files[3])
+nars17 <- read_csv(files[4])
+nars22 <- read_csv(files[5])
+
+# nars 2012 needs an extra file with Site information
+nars12.sites <- read_csv(files[2])
+# merge nars12 site codes
+nars12 <- merge(nars12, nars12.sites[,c("UID", "DATE_COL")], by = "UID")
+# nars 2012 also contains Chla in a different file beacause reasons?
+nars12.chla <- read_csv(files[1])
+nars12 <- merge(nars12, nars12.chla[,c("UID", "CHLX_UNITS", "CHLX_RESULT")], by = "UID")
+```
+
+```{r}
+# 2017 is in long format, need to pivot wide
+nars17.rslt <- nars17 %>% 
+  mutate(ANALYTE = paste0(ANALYTE, "_RESULT")) %>% 
+  pivot_wider(id_cols = c(UID, DATE_COL, SITE_ID, VISIT_NO, LAT_DD83, LON_DD83), 
+                                      names_from = ANALYTE, values_from = RESULT)
+nars17.units <- nars17 %>% 
+  mutate(ANALYTE = paste0(ANALYTE, "_UNITS")) %>% 
+  pivot_wider(id_cols = c(UID, DATE_COL, SITE_ID, VISIT_NO, LAT_DD83, LON_DD83), 
+                                      names_from = ANALYTE, values_from = RESULT_UNITS)
+nars17.wide <- merge(nars17.rslt, nars17.units, by = c("UID", "DATE_COL", "SITE_ID", "VISIT_NO", "LAT_DD83", "LON_DD83"))
+```
+
+
+```{r}
+# selected columns of interest
+
+# 2012
+colnames(nars12)
+nars12 <- nars12 %>% mutate(DATE_COL = mdy(DATE_COL)) %>%
+  select(SITE_ID, UID, DATE_COL, VISIT_NO, LON_DD83, LAT_DD83,
+         COLOR_RESULT, COLOR_UNITS, 
+         DOC_UNITS, DOC_RESULT, TURB_UNITS, TURB_RESULT,
+         CHLA_UNITS = CHLX_UNITS, CHLA_RESULT = CHLX_RESULT, COND_UNITS, COND_RESULT,
+         PTL_UNITS, PTL_RESULT, NTL_UNITS, NTL_RESULT)
+
+# 2017
+nars17 <- nars17.wide %>% mutate(DATE_COL = dmy(DATE_COL)) %>%
+  select(UID, SITE_ID, DATE_COL, VISIT_NO, LON_DD83, LAT_DD83, 
+         COLOR_RESULT, COLOR_UNITS, DOC_RESULT, DOC_UNITS, TURB_UNITS, TURB_RESULT, 
+         COND_RESULT, COND_UNITS, CHLA_RESULT, CHLA_UNITS, PTL_RESULT, PTL_UNITS, 
+         NTL_RESULT, NTL_UNITS)
+
+# 2022
+nars22 <- nars22 %>% mutate(DATE_COL = mdy(DATE_COL)) %>%
+  select(UID, SITE_ID, DATE_COL, VISIT_NO, LAT_DD83, LON_DD83,
+         COLOR_RESULT, COLOR_UNITS, DOC_RESULT, DOC_UNITS, TURB_UNITS, TURB_RESULT, 
+         COND_RESULT, COND_UNITS, CHLA_RESULT, CHLA_UNITS = CHLA_RESULT_UNITS, PTL_UNITS, PTL_RESULT, NTL_UNITS, NTL_RESULT)
+
+```
+
+```{r}
+# inspected unit columns and all units appear to be consistent
+# bind data to gether
+nars.all <- bind_rows(nars12, nars17, nars22)
+ # double check units are consistent
+unique(nars.all$COLOR_UNITS) # yep
+unique(nars.all$TURB_UNITS) # yep
+unique(nars.all$DOC_UNITS) # yep
+unique(nars.all$CHLA_UNITS) # yep
+unique(nars.all$COND_UNITS) # yep
+unique(nars.all$PTL_UNITS)  # yep
+unique(nars.all$NTL_UNITS) # yep
+```
+
+```{r}
+# clean data set
+nars.all <- nars.all %>%
+  mutate(PTL_RESULT = PTL_RESULT/1000,
+         year = year(DATE_COL)) %>%
+  select(SITE_ID, UID, VISIT_NO, DATE_COL, year,
+         LON_DD83, LAT_DD83, COLOR_ptco = COLOR_RESULT, 
+         DOC_mgL = DOC_RESULT, TURB_NTU = TURB_RESULT, 
+         Chla_ugL = CHLA_RESULT, COND_uScm = COND_RESULT, 
+         TP_ppm = PTL_RESULT, TN_ppm = NTL_RESULT) %>%
+  # create "new" data for merging
+  mutate(month = month(DATE_COL),
+         new_date = ymd(paste0(year, "/", month, "/01")))
+
+# drop duplicate visits
+nars.all <- nars.all[nars.all$VISIT_NO == 1, ] # 3665 - 3372 so a couple of duplicates. gonna work with the first entry only
+```
+
+## NARS to spatial file
+
+```{r}
+nars.spatial <- st_as_sf(nars.all, coords = c("LON_DD83", "LAT_DD83"))
+st_crs(nars.spatial) <- 4326
+# quick check
+ggplot() + geom_sf(data = nars.spatial) # yup, that is good
+
+```
+
+## NARS, Hydro_lakes and DWL merging
+
+```{r}
+# load hydrolakes polygon
+hydro.poly <- st_read("data/GIS/HydroLakes.gpkg", layer = "hydrolakes_poly")
+hydro.poly <- hydro.poly[,c("Hylak_id", "geom")]
+```
+
+```{r}
+# reprojecting NARS layer and merging with hydro lakes to obtain Hylak_id
+nars.spatial <- st_transform(nars.spatial, st_crs(hydro.poly))
+nars.spatial <- st_join(nars.spatial, hydro.poly, st_within)
+nars.spatial <- drop_na(nars.spatial) # drop objects which don't intersect
+ggplot() + geom_sf(data = nars.spatial)
+
+```
+
+
+```{r}
+# add ecoregion designation to NARS data
+ecoregions <- st_read(dsn = "data/GIS/USA_ECOREGIONS.gpkg", layer = "USA_ECOREGIONS_LEVEL_3")
+nars.spatial <- st_transform(nars.spatial, st_crs(ecoregions))
+nars.spatial <- st_join(nars.spatial, ecoregions, st_within)
+```
+
+
+## Load and clean limnosat data
+
+```{r}
+limnosat.dwl <- read_csv("data/LimnoSat US.csv") %>%
+  filter(Hylak_id %in% nars.spatial$Hylak_id) %>%
+  # basic cleaning I performed for all other analyses
+  mutate(month = month(date), year = year(date)) %>%
+  filter(year %in% c(2012, 2017, 2022), month %in% 4:10, dWL >= 475 & dWL <= 583) %>%
+  # create "new" data for monthly averages
+  mutate(new_date = ymd(paste0(year, "/", month, "/01"))) %>%
+  group_by(Hylak_id, new_date) %>%
+  summarise(dWL = median(dWL))
+```
+## Merge LimnoSat data with NLA data
+
+```{r}
+nars.dwl <- merge(nars.spatial, limnosat.dwl, by = c("Hylak_id", "new_date"))
+```
+
+```{r}
+# check where all the locations are
+ggplot() + geom_sf(data = nars.dwl)
+table(nars.dwl$NA_L3NAME, nars.dwl$year)
+```
+
+## Export data sets
+
+```{r}
+# subset to only sandhills
+# nars.sandhills <- nars.spatial %>% filter(NA_L3NAME == "Nebraska Sand Hills")
+# nars.dwl.sandhills <-  nars.dwl %>% filter(NA_L3NAME == "Nebraska Sand Hills")
+# 
+# # write files
+# st_write(nars.spatial, dsn = "data/GIS/NARS_spatial.gpkg", layer = "NARS_spatial_usa")
+# st_write(nars.sandhills, dsn = "data/GIS/NARS_spatial.gpkg", layer = "NARS_spatial_ne_sandhills")
+# st_write(nars.dwl, dsn = "data/GIS/NARS_spatial.gpkg", layer = "NARS_spatial_usa_dwl")
+# st_write(nars.dwl.sandhills, dsn = "data/GIS/NARS_spatial.gpkg", layer = "NARS_spatial_ne_sandhills_dwl")
+# 
+# write_csv(st_drop_geometry(nars.dwl), "data/nars_usa_dwl.csv")
+# write_csv(st_drop_geometry(nars.dwl.sandhills), "data/nars_ne_sandhills_dwl.csv")
+
+
+```
+
+## Create overview map
+
+Calculate color classes
+
+```{r}
+nars.dwl.medians <- nars.dwl %>%
+  group_by(Hylak_id) %>%
+  summarise(dWL = median(dWL)) %>%
+  mutate(group = ifelse(dWL <= 495, "Blue", ifelse(dWL >= 560, "Brown", "Green")))
+  
+```
+
+
+```{r}
+# usa states
+usa <- st_read("data/GIS/USA_STATES.gpkg", layer = "USA_STATES_CONTER")
+(dwl.map <- ggplot() + 
+  geom_sf(data = usa, color = "black", fill = "white") + 
+  geom_sf(data = nars.dwl.medians, aes(fill = group), pch = 21,col = "black") + 
+  scale_fill_manual(values =c ("Blue" = "blue", "Brown" = "brown", "Green" = "forestgreen")) + 
+  #geom_sf(data = nars.dwl.sandhills, aes(fill = "Ne Sandhills"), pch = 21, col = "black", size = 2) + 
+  #scale_fill_manual(values = c("USA" = "grey60", "Ne Sandhills" = "black")) + 
+  labs(fill = NULL))
+
+ggsave("figures/nars_dwl_map.jpg", dwl.map, width = 7, height = 4)
+```
+
+## Relationship(s) between TSS and water chemistry data for 2012 lakes
+
+```{r}
+summary(lm(log10(TSS_RESULT + 0.001) ~ log10(TURB_RESULT + 0.001), data = nars12))
+summary(lm(log10(TSS_RESULT + 0.001) ~ log10(CHLA_RESULT + 0.001), data = nars12))
+summary(lm(log10(TSS_RESULT + 0.001) ~ log10(DOC_RESULT + 0.001), data = nars12))
+summary(lm(log10(TSS_RESULT + 0.001) ~ log10(COLOR_RESULT + 0.001), data = nars12))
+
+
+```
+

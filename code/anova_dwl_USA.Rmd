@@ -1,0 +1,229 @@
+---
+title: "LimnoSat Sandhills vs US lakes"
+author: "Daniel Gschwentner"
+date: "2025-02-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+
+Bayesian ANOVA of DWL in Sandhill lakes compared to US lakes
+
+```{r}
+# load packages
+rm(list = ls())
+lapply(c("tidyverse", "brms", "sf"), require, character.only = T)
+source("code/theme_R.R")
+theme_set(theme)
+```
+```{r}
+# custom negate function
+`%nin%` <- Negate(`%in%`)
+```
+
+```{r}
+# create forel-ule color scale for plotting
+# Code is from Simon Topp Github: https://github.com/GlobalHydrologyLab/LakeReflectanceRepo/blob/master/00_Functions.R
+
+## Code for connnecting dWL to forel-ule index 
+fui.lookup <- tibble(dWL = c(471:583), fui = NA)
+
+fui.lookup$fui[fui.lookup$dWL <= 583] = 21
+fui.lookup$fui[fui.lookup$dWL <= 581] = 20
+fui.lookup$fui[fui.lookup$dWL <= 579] = 19
+fui.lookup$fui[fui.lookup$dWL <= 577] = 18
+fui.lookup$fui[fui.lookup$dWL <= 575] = 17
+fui.lookup$fui[fui.lookup$dWL <= 573] = 16
+fui.lookup$fui[fui.lookup$dWL <= 571] = 15
+fui.lookup$fui[fui.lookup$dWL <= 570] = 14
+fui.lookup$fui[fui.lookup$dWL <= 569] = 13
+fui.lookup$fui[fui.lookup$dWL <= 568] = 12
+fui.lookup$fui[fui.lookup$dWL <= 567] = 11
+fui.lookup$fui[fui.lookup$dWL <= 564] = 10
+fui.lookup$fui[fui.lookup$dWL <= 559] = 9
+fui.lookup$fui[fui.lookup$dWL <= 549] = 8
+fui.lookup$fui[fui.lookup$dWL <= 530] = 7
+fui.lookup$fui[fui.lookup$dWL <= 509] = 6
+fui.lookup$fui[fui.lookup$dWL <= 495] = 5
+fui.lookup$fui[fui.lookup$dWL <= 489] = 4
+fui.lookup$fui[fui.lookup$dWL <= 485] = 3
+fui.lookup$fui[fui.lookup$dWL <= 480] = 2
+fui.lookup$fui[fui.lookup$dWL <= 475 & fui.lookup$dWL >470] = 1
+
+
+# Actual Forel-Ule Colors
+fui.colors <- data.frame(col = c(
+  "#2158bc", "#316dc5", "#327cbb", "#4b80a0", "#568f96", "#6d9298", "#698c86", 
+  "#759e72", "#7ba654", "#7dae38", "#94b660","#94b660", "#a5bc76", "#aab86d", 
+  "#adb55f", "#a8a965", "#ae9f5c", "#b3a053", "#af8a44", "#a46905", "#9f4d04"),
+  fui = 1:21)
+
+# merge
+fui.lookup <- merge(fui.colors, fui.lookup, by = "fui")
+
+```
+
+Load and clean LimnoSat US data set
+
+```{r}
+# load data 
+limnosat.dwl <- read_csv("data/LimnoSat US.csv")
+```
+
+Drop winter observations (keep April to October)
+Only include data from 1984 to 2019
+Filter to only include DWL from 475 to 583
+
+```{r}
+limnosat.dwl <- limnosat.dwl %>%
+  mutate(month = month(date), year = year(date)) %>%
+  filter(year < 2020, month %in% 4:10, dWL >= 475 & dWL <= 583)
+```
+
+Median values
+
+```{r}
+limnosat.medians <- limnosat.dwl %>%
+  group_by(Hylak_id) %>%
+  summarise(dWL = median(dWL))
+```
+
+Add ecoregion designation
+
+```{r}
+# add us level 3 ecoregion designation from GIS layer
+lakes.eco.code <- st_read("data/GIS/HydroLakes.gpkg", layer = "Hydro_lakes_US_eco3") # already contains ecoregion 3, did this in QGIS
+lakes.eco.code <- lakes.eco.code %>% filter(Hylak_id %in% limnosat.medians$Hylak_id)
+lakes.eco.code %>% st_drop_geometry() %>% group_by(NA_L3NAME) %>% summarise(n = n())
+```
+
+
+```{r}
+# add ecoregion designator to dWL measurements
+all <- merge(limnosat.medians, st_drop_geometry(lakes.eco.code[,c("Hylak_id", "NA_L1NAME", "NA_L3NAME")]), by = "Hylak_id", all.x = F, all.y = F)
+# test
+all %>% group_by(NA_L3NAME) %>% summarise(n = n())
+# remove 6 water ecoregions
+all <- all[all$NA_L1NAME != "WATER", ]
+# length unique
+length(unique(all$Hylak_id)) 
+```
+
+```{r}
+# add in nr of ecoregions and assign factor levels
+n.groups <- all  %>% group_by(NA_L3NAME) %>% summarise(n = n()) %>%
+  mutate(new.name = paste0(NA_L3NAME, ", n = ", n)) %>%
+  arrange(desc(n)) %>%
+  mutate(new.name = factor(new.name))
+levels(n.groups$new.name)
+
+```
+
+```{r}
+# plot density distributions
+dens <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(xmin = dWL, xmax = dWL + 1, ymin = 0, ymax = 0.10, fill = col)) + scale_fill_identity() +  
+  geom_density(data = all, aes(dWL, group = NA_L3NAME), col = "grey", lwd = .1, alpha = 0.2) + 
+  geom_density(data = all[all$NA_L3NAME == "Nebraska Sand Hills",], aes(dWL, group = NA_L3NAME), col = "black", lwd = .8) + 
+  #scale_fill_manual(fui.colors$col) + 
+  labs(x = "DWL", y = "Density", lty = NULL, fill = NULL) + scale_y_continuous(breaks = c(0, 0.04, 0.07)) + scale_x_continuous(breaks = c(475, 500, 525, 550, 575))
+dens
+```
+
+```{r}
+# fit test anova
+anova.simple <- aov(dWL ~ NA_L3NAME, data = all); hist(resid(anova.simple));summary(anova.simple)
+tukey <- as.data.frame(TukeyHSD(anova.simple)$NA_L3NAME)
+tukey$name <- rownames(tukey)
+tukey <- tukey %>% filter(str_detect(name, "Nebraska Sand Hills"))
+table(tukey$`p adj` < 0.05)
+```
+```{r}
+# add trophic designation
+all$trophic <- ifelse(all$dWL < 526, "oligo", "eutro")
+all$trophic <- factor(all$trophic, levels = c("oligo", "eutro"))
+```
+
+
+```{r}
+# fitting brms model
+priors.anova <- c(prior(uniform(300, 700),lb = 300, ub = 700,  class = Intercept), 
+  prior(normal(0, 100), class = b), # applies to all slopes
+  prior(exponential(1), class = sigma), 
+  prior(exponential(1), class = sd))
+
+anova.brms <- brm(
+  bf(dWL ~ 1 + trophic +  (1 | NA_L3NAME)), data = all,
+  prior = priors.anova, 
+  family = gaussian(), 
+  control = list(adapt_delta = 0.99),
+  file = "model_files/dwl_anova_usa",
+  chains = 4, iter = 8000, warmup = 1000 # update these later 
+)
+plot(anova.brms)
+pp_check(anova.brms) # clearly an important component is missing here...including trophic state as an intercept to force the model to behave
+summary(anova.brms)
+ranef(anova.brms)
+```
+
+```{r}
+# posterior predictions
+newdata <- all %>% group_by(NA_L3NAME, trophic) %>% summarise(n = n())  # expand.grid(NA_L3NAME = unique(all$NA_L3NAME), trophic = c("oligo", "eutro"))
+pred <-  tidybayes::add_epred_draws(newdata = newdata, object = anova.brms)
+
+# calculate total n of groups per ecoregion
+pred.summary <- pred %>%
+  group_by(NA_L3NAME, trophic) %>%
+  summarise(mean.DWL = mean(.epred),
+            lwr = quantile(.epred, 0.025), 
+            upr = quantile(.epred, 0.975)) %>%
+  ungroup() %>%
+  mutate_at(3:5, round, 0)
+
+# renaming levels
+pred.summary$group <- ifelse(pred.summary$trophic == "oligo", "DWL < 526", "DWL > 526")
+
+# create an index of high to low DWL for plotting purposes
+index <- all %>% 
+  group_by(NA_L3NAME) %>%
+  summarise(mean.DWL = mean(dWL)) %>%
+  arrange(desc(mean.DWL)) %>%
+  mutate(index = as.factor(1:nrow(.))) %>%
+  select(NA_L3NAME, index)
+
+# merge back into pred.summary
+pred.summary <- merge(pred.summary, index, by = "NA_L3NAME")
+  
+# plot
+(pred.plot <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(xmin = dWL, xmax = dWL + 1, ymin = -Inf, ymax = Inf, fill = col)) +
+  scale_fill_identity() + 
+  geom_point(data = pred.summary, aes(y = index, x =  mean.DWL), col = "grey") + 
+  geom_errorbar(data = pred.summary, aes(y = index, xmin = lwr, xmax = upr, group = group), col = "grey",
+                 lwd = .1, alpha = 0.2) + 
+  geom_point(data = pred.summary[pred.summary$NA_L3NAME == "Nebraska Sand Hills",], 
+             aes(y = index, x = mean.DWL), col = "black") + 
+  geom_errorbar(data = pred.summary[pred.summary$NA_L3NAME == "Nebraska Sand Hills",],
+                aes(y = index, xmin = lwr, xmax = upr, group = group), col = "black") + 
+  facet_wrap(group~.) + 
+  labs(y = NULL, x = "DWL") + theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) ) + 
+  scale_x_continuous(breaks = c(475, 500, 525, 550, 575))
+
+
+```
+
+```{r}
+
+# align and save figure
+dens.final <- ggpubr::ggarrange(plotlist = list(dens, pred.plot), align = "hv", 
+                                widths = c(1/3, 2/3), nrow = 1, ncol = 2, labels = letters[1:2])
+dens.final
+ggsave("figures/dwl_us_lakes_density.jpg", dens.final, width = 9, height = 4)
+```
+
+
+

@@ -1,0 +1,202 @@
+---
+title: "annual_ave_groundwater"
+author: "Daniel Gschwentner"
+date: "2024-12-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+lapply(c("tidyverse", "brms", "tidybayes", "lme4"), require, character.only = T)
+source("code/theme_R.r"); source("code/fui_background.R")
+```
+
+## Load data
+
+```{r}
+# lake and groundwater dataset
+gwl.dwl <- read_csv("data/Sandhills_limnosat_annual_medians_gw_18Feb25.csv")
+# lake and groundwater dataset
+gwl.dwl.monthly <- read_csv("data/Sandhills_limnosat_monthly_gw_18Feb25.csv")
+# annual groundwater levels
+ann.gwl <- read_csv("data/annual_gw_levels.csv")
+# meta-data for lakes and wells (contains lake code matched to well ID and distance to well)
+lakes.wells.meta <- selected.lakes <- sf::st_read(dsn = "data/GIS/sandhill_lakes.gpkg", layer = "selected_gw_lakes_18Feb25") %>% sf::st_drop_geometry()
+```
+## Fit models
+
+```{r}
+# model priors
+priors.gwl <- c(prior(uniform(400, 700),lb = 400, ub = 700,  class = Intercept), 
+  prior(uniform(-1000, 1000), lb = -1000, ub = 1000, class = b), 
+  prior(exponential(1), class = sigma),
+  prior(exponential(1), class = sd), 
+  prior(lkj(2), class = cor),
+  prior(exponential(1), class = nu))
+```
+
+
+```{r}
+start <- Sys.time()
+# fit model
+gwl_model <- brm(bf(dWL ~ gwl_bl_surface_ft  + (1 + gwl_bl_surface_ft  | Hylak_id)), 
+                    data = gwl.dwl, 
+                    prior = priors.gwl, family = student(),
+                    chains = 4, iter = 8000, warmup = 1000 , 
+                 file = "model_files/groundwater_dwl")
+end <- Sys.time()
+end - start
+summary(gwl_model)
+```
+## Model evaluation
+
+```{r}
+# check chains; look mixed
+plot(gwl_model)
+
+# posterior predictive checks; looks good to me
+pp_check(gwl_model) + scale_x_continuous(limits = c(450, 700))
+
+# bayes R2
+gwl_model <- add_criterion(gwl_model, criterion = "bayes_R2")
+bayes_R2(gwl_model) # 0.34 with range of .31 to .46 --> pretty good actually!
+```
+```{r}
+ranefs.gwl <- ranef(gwl_model)
+ranefs.gwl.slopes <- ranefs.gwl$Hylak_id[,, "gwl_bl_surface_ft"]
+range(ranefs.gwl.slopes[,1]); mean(ranefs.gwl.slopes[,1])
+```
+
+
+```{r}
+# fit lmer model 
+gw.lmer <- lmer(dWL ~ gwl_bl_surface_ft  + (1 + gwl_bl_surface_ft  | Hylak_id), data = gwl.dwl)
+summary(gw.lmer) # produces pretty similar output to the Bayesian model which is reassuring
+confint(gw.lmer) # all terms are sign. as confidence intervals do not overlap with 0
+```
+
+## Posterior predictions
+
+```{r}
+# posterior predictions for groundwater model
+# newdata
+# loop creates a list of grids so that we do not extrapolate beyond the gwl range for each system
+newdata <- lapply(unique(ann.gwl$Name), function(i) {
+  vec <- ann.gwl[ann.gwl$Name == i,]$gwl_bl_surface_ft
+  grid <- expand.grid(Name = i, gwl_bl_surface_ft = seq(min(vec), max(vec), length.out = 20))
+  return(grid)
+})
+newdata <- do.call(rbind, newdata) # to df
+newdata <- merge(newdata, distinct(gwl.dwl[,c("Name", "Hylak_id")]), by = "Name") # add in 
+
+# predict values
+post.pred <- add_epred_draws(newdata = newdata, object = gwl_model) %>%
+  group_by(Hylak_id, gwl_bl_surface_ft) %>% 
+  summarise(epred_dwl = mean(.epred), 
+            upr = quantile(.epred, 0.975), 
+            lwr = quantile(.epred, 0.025)) 
+
+# add well IDs
+post.pred <- merge(post.pred, lakes.wells.meta, by = "Hylak_id")
+
+```
+
+Code chunk calculates the probability of observing a positive slope (which would indicate that declining GWL increase lake color)
+
+```{r}
+# calculate probability of observing positive slope for each lake
+posterior_samples <- posterior_samples(gwl_model) # posterior samples
+lakes.id <- unique(gwl.dwl$Hylak_id) # group IDS
+# iterate over groups
+prob.pos.slope <- lapply(lakes.id, function(i){
+   slope_samples <- posterior_samples[, paste0("r_Hylak_id[", i, ",gwl_bl_surface_ft]" )] # extract slopes
+   prob_pos <- mean(slope_samples > 0) # Calculate the proportion of samples where the slope is positive
+})
+sign  <- lapply(lakes.id, function(i){
+   slope_samples <- posterior_samples[, paste0("r_Hylak_id[", i, ",gwl_bl_surface_ft]" )] # extract slopes
+   sign <- ifelse(quantile(slope_samples, 0.025) < 0 & quantile(slope_samples, 0.975) > 0, "ns.", "sign.") # calculate whether slope is sign.
+})
+# turn into data frame and add lake, well IDs
+prob.pos.slope <- data.frame(prob.pos.slope = unlist(prob.pos.slope), sign = unlist(sign), Hylak_ID = lakes.id)
+# add in wells
+prob.pos.slope <- merge(prob.pos.slope, lakes.wells.meta, by.x = "Hylak_ID", by.y = "Hylak_id")
+
+# tabulate
+table(prob.pos.slope$prob.pos.slope > 0.5)
+table(prob.pos.slope$Name, prob.pos.slope$sign)
+table(prob.pos.slope$prob.pos.slope > 0.5, prob.pos.slope$Name, prob.pos.slope$sign)
+
+prob.pos.slope.df <- prob.pos.slope %>% group_by(Name) %>% summarise(n = n(), pos = sum(prob.pos.slope>.5)) %>% mutate(perc_pos = pos * 100/n)
+
+```
+
+Create figure of lake DWL and regional GWL
+
+```{r}
+# plot the predicted groundwater level trends
+
+# add levels to wells: gradient W to E
+gwl.dwl$Name <- factor(gwl.dwl$Name, levels = 
+ c("SheridanSouth", "Antioch", "CrescentLake", "SWCherryCounty", "GrantCounty", 
+   "CherryCounty", "ArthurCounty", "SECherryCounty", "BartaBrothers"))
+post.pred$Name <- factor(post.pred$Name, levels = 
+ c("SheridanSouth", "Antioch", "CrescentLake", "SWCherryCounty", "GrantCounty", 
+   "CherryCounty", "ArthurCounty", "SECherryCounty", "BartaBrothers"))
+# facet by well locations --> should be arranged west to east across Sandhills
+# add whether model slope is sign.
+post.pred <- merge(post.pred, prob.pos.slope[,c("Hylak_ID", "Name", "sign")], by.x = c("Hylak_id", "Name"), by.y = c("Hylak_ID", "Name"))
+# plot
+fig.gwl.dwl <- ggplot() + 
+  geom_rect(data = fui.lookup, aes(ymin = dWL, ymax = dWL + 1, xmin = -Inf, xmax = Inf , fill = col), alpha = 0.8) + scale_fill_identity() +  
+  geom_point(data = gwl.dwl, aes(x = gwl_bl_surface_ft , dWL), pch = 21, col = "black", fill = "white") +
+  geom_line(data = post.pred, aes(x = gwl_bl_surface_ft, y = epred_dwl, group = Hylak_id, alpha = sign)) + facet_wrap(Name~., scales = "free_x") + 
+  labs(x = "Groundwater level (ft. below surface)", y = "DWL") + 
+  scale_y_continuous(breaks = c(400, 450, 500, 550, 600))
+fig.gwl.dwl
+
+#ggsave("figures/gwl_dwl.jpg", fig.gwl.dwl, width = 7, height = 6, dpi = 500)
+```
+
+## Fit models for monthly data
+
+```{r}
+# model priors
+priors.gwl <- c(prior(uniform(400, 700),lb = 400, ub = 700,  class = Intercept), 
+  prior(uniform(-1000, 1000), lb = -1000, ub = 1000, class = b), 
+  prior(exponential(1), class = sigma),
+  prior(exponential(1), class = sd), 
+  prior(lkj(2), class = cor),
+  prior(exponential(1), class = nu))
+```
+
+
+```{r}
+start <- Sys.time()
+# fit model
+gwl_model.monthly <- brm(bf(dWL ~ gwl_bl_surface_ft  + (1 + gwl_bl_surface_ft  | Hylak_id)), 
+                    data = gwl.dwl.monthly, 
+                    prior = priors.gwl, family = student(),
+                    chains = 4, iter = 8000, warmup = 1000 , 
+                 file = "model_files/groundwater_dwl_monthly")
+end <- Sys.time()
+end - start
+summary(gwl_model)
+```
+
+```{r}
+library(lme4)
+# fit model
+gwl_model.monthly <- lmer(bf(dWL ~ gwl_bl_surface_ft  + (1 + gwl_bl_surface_ft  | Hylak_id)), 
+                    data = gwl.dwl.monthly)
+summary(gwl_model.monthly)
+confint(gwl_model.monthly)
+end <- Sys.time()
+end - start
+summary(gwl_model)
+```
+

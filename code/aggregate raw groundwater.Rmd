@@ -1,0 +1,111 @@
+---
+title: "GWL aggregation"
+author: "Daniel Gschwentner"
+date: "2024-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+```
+
+```{r}
+# load entire GWL record
+ne_gwl <- read_csv("GWL/raw_download/NE/WATERLEVEL.csv")
+head(ne_gwl)
+unique(ne_gwl$SiteNo)
+```
+
+```{r}
+# list of gw wells to keep
+wells.keep <- c(26, 57, 22, 27, 44, 39, 46, 36, 9, 8, 10, 43, 40, 50, 13, 51, 47, 12, 49)
+wells.name <- c("Angora", "Alliance", "SheridanSouth", "Antioch", "CrescentLake", "SWCherryCounty", "CherryCounty", "GrantCounty", "KeithCounty", "ArthurCounty", "NLincolnCounty", "Thedford", "SECherryCounty", "Ainsworth", "BartaBrothers", "LoupCountry", "HoltCounty", "WheelerCounty", "ONeill")
+lon <- c(-41.88339,-102.8751, -102.7047, -102.5778, -102.4447, -101.8085, -101.4775, -101.5432, -101.5096, -101.438, -100.8778, -100.569, -100.5313, -99.87128, -99.65253, -99.48348, -99.08482, -98.44691, -98.5014)
+lat <- c(41.88339,42.15231,42.26633,42.00876, 41.76923, 42.33036, 42.42217, 41.93449, 41.23633, 41.66554, 41.39224, 41.97774, 42.21729, 42.48042, 42.24461, 41.94151, 42.20639, 41.94378, 42.5308)
+```
+
+```{r}
+# filter records
+# how many records contained?
+table(as.character(wells.keep) %in% unique(ne_gwl$SiteNo)) # 17 contained
+# which are missing
+wells.keep[!as.character(wells.keep) %in% unique(ne_gwl$SiteNo)] 
+wells.name[!as.character(wells.keep) %in% unique(ne_gwl$SiteNo)] # no crescent lake data; no ainsworth data; crescent I can supply independently
+
+# filter
+ne_gwl_keep <- ne_gwl %>% filter(SiteNo %in% as.character(wells.keep))
+```
+```{r}
+# date time aggregation; only records post 2008
+ne_gwl_monthly <- ne_gwl_keep %>%
+  mutate(ymd_hms = ymd_hms(Time),
+         year = year(ymd_hms), 
+         month = month(ymd_hms),
+         date = ymd(paste0(year, "/", month, "/01"))) %>%
+  filter(year > 2007) %>%
+  group_by(SiteNo, date) %>%
+  summarise(gwl_bl_surface_ft = mean(`Depth to Water Below Land Surface in ft`, na.rm = T))
+
+# drop some silly measurments
+ne_gwl_monthly <- ne_gwl_monthly %>% filter(gwl_bl_surface_ft < 200)
+
+```
+
+```{r}
+# add crescent lake data
+crescent <- read_csv("GWL/GWL_CLNWR_CLEAN.csv") %>%
+  select(date = DMY,gwl_bl_surface_ft = `Water Level Below Surface Feet` ) %>%
+  mutate(date = ymd(date), SiteNo = "44") %>%
+  filter(year(date) > 2007)
+
+# bind rows
+ne_gwl_monthly <- bind_rows(ne_gwl_monthly, crescent)
+```
+
+```{r}
+# add name
+ne_gwl_monthly <- merge(ne_gwl_monthly, data.frame(SiteNo = wells.keep, Name = wells.name), 
+                        by = "SiteNo", all.y = F, all.x = T)
+```
+
+
+```{r}
+# plot data for sanity check
+ne_gwl_monthly%>%
+  ggplot(aes(date, gwl_bl_surface_ft, group = SiteNo)) + geom_line()
+
+```
+
+```{r}
+# calculate lake-specific zscore
+ne_gwl_monthly <- ne_gwl_monthly %>%
+  group_by(SiteNo) %>%
+  mutate(zscore.gwl = (gwl_bl_surface_ft - mean(gwl_bl_surface_ft))/sd(gwl_bl_surface_ft))
+```
+
+
+```{r}
+# plot data for sanity check
+ne_gwl_monthly%>%
+  ggplot(aes(date, zscore.gwl, group = SiteNo)) + geom_line()
+
+```
+
+```{r}
+# save file
+#write_csv(ne_gwl_monthly, "GWL/sandhills_gwl_monthly_clean.csv")
+```
+
+```{r}
+# well IDS
+well.ids <- data.frame(
+  SiteNo = wells.keep, Name = wells.name, lon = lon, lat = lat
+)
+#write_csv(well.ids, "GIS/GW_wells_id.csv")
+```
+

@@ -1,0 +1,163 @@
+---
+title: "Drivers of lake color annual averages"
+author: "Daniel Gschwentner"
+date: "2024-12-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+lapply(c("tidyverse", "brms", "tidybayes", "lme4"), require, character.only = T)
+source("code/theme_R.r")
+```
+
+## Load data sets
+
+```{r}
+# data
+sh.annual <- read_csv("data/Sandhills_limnosat_annual_medians_climate_18Feb25.csv")
+```
+## Data transformation
+
+Compute z-score to standardize effect sizes
+
+```{r}
+# z-score function
+zscores <- function(x){(x - mean(x))/sd(x)}
+# calculate z-scores of all variables
+z.scores <- sh.annual %>%
+  mutate(zscore_dWL = zscores(dWL),
+         zscore_temp = zscores(ann_temp_C),
+         zscore_precip = zscores(ppt_mm),
+         zscore_elev = zscores(elev_m),
+         zscore_lake_area = zscores(lake_area_km2)) 
+
+# correlation matrix
+cor(z.scores[,c(18:22)])
+cor.test(z.scores$zscore_elev, z.scores$zscore_precip)
+
+```
+## Model fitting
+
+```{r}
+# priors for model
+# priors
+priors.ctrls <- c(prior(uniform(-10, 10), lb = -10, ub = 10, class = Intercept), 
+  prior(uniform(-10, 10), lb = -10, ub = 10, class = b), # applies to all slopes,
+  prior(exponential(1), class = sigma),
+  prior(exponential(1), class = sd), 
+  prior(exponential(1), class = nu))
+
+```
+
+```{r}
+# fit model
+start <- Sys.time()
+dwl.ctrls <- brm(zscore_dWL ~ zscore_temp + zscore_precip + zscore_elev  + zscore_lake_area + 
+                  (1 | Hylak_id), data = z.scores, prior = priors.ctrls,
+                 family = student(), iter = 8000, warmup = 500, chains = 4, 
+                 file = "model_files/climate_dwl_all")
+
+
+end <- Sys.time()
+(time.diff <- end - start)
+summary(dwl.ctrls, digits =3)
+```
+
+```{r}
+# create figure of DWL ctrls
+
+# first, get draws of variables; then plot with 95% CIs
+var.int <- dwl.ctrls %>% spread_draws(b_Intercept ) %>% rename(val = b_Intercept)
+var.temp <- dwl.ctrls %>% spread_draws(b_zscore_temp) %>% rename(val = b_zscore_temp)
+var.precip <- dwl.ctrls %>% spread_draws(b_zscore_precip) %>% rename(val = b_zscore_precip )
+var.elev <- dwl.ctrls %>% spread_draws(b_zscore_elev) %>% rename(val = b_zscore_elev )
+var.lake.area <- dwl.ctrls %>% spread_draws(b_zscore_lake_area) %>% rename(val = b_zscore_lake_area)
+
+# combine together
+vars <- bind_rows(var.int, var.temp, var.precip, var.elev, var.lake.area) %>%
+  mutate(var = rep(c("Int.", "temp.", "precip.", "elev.", "lake_area"), each = nrow(var.elev))) %>%
+  mutate(var = factor(var, levels = c("Int.", "temp.", "precip.", "elev.", "lake_area")))
+
+# create quantiles for plotting
+vars.quantiles <- vars %>%
+  group_by(var) %>%
+  summarise(lwr = quantile(val, 0.025),
+            upr = quantile(val, 0.975), 
+            mean = mean(val))
+
+# plot
+(eff.size.fig <- ggplot() +
+    geom_vline(xintercept = 0, lty = "dashed") + 
+    geom_linerange(data = vars.quantiles, aes(x = mean, xmin = lwr, xmax = upr, y = var ), lwd = 0.5) + 
+    geom_point(data = vars.quantiles, aes(x = mean, y = var), pch = 21, size = 2, fill = "grey80") + 
+    scale_y_discrete(limits = rev) + 
+    labs(x = "Effect size + 95% CI", y = NULL))
+  
+cowplot::save_plot("figures/climate_eff_sizes.jpg", eff.size.fig, base_width = 4)  
+  
+```
+
+
+
+
+```{r}
+plot(dwl.ctrls)
+pp_check(dwl.ctrls) + scale_x_continuous(limits = c(-10, 10))
+#bayes_R2(dwl.ctrls) # 0.30 w. range of 0.29 - 0.31; not too bad! takes forever to run :(
+```
+
+```{r}
+# lme4 comparison
+dwl.ctrls.lmer <- lmer(zscore_dWL ~ zscore_temp + zscore_precip + zscore_elev  + zscore_lake_area + 
+                   (1 | year) + (1 | Hylak_id), data = z.scores)
+summary(dwl.ctrls.lmer); confint(dwl.ctrls.lmer)
+VarCorr(dwl.ctrls.lmer)
+# pretty similar output although effect of variables is larger but intercept is much smaller. A result of the distribution used?!
+```
+
+
+
+```{r}
+# refit models only using elevation and climate respectively
+
+# fit model
+start <- Sys.time()
+dwl.climate <- brm(zscore_dWL ~ zscore_precip + (1 | year) + (1 | Hylak_id), data = z.scores, prior = priors.ctrls,
+                 family = student(), iter = 8000, warmup = 1000, chains = 4, 
+                 file = "model_files/dwl_ctrls_climate_model")
+end <- Sys.time()
+
+# fit model
+start <- Sys.time()
+dwl.elev <- brm(zscore_dWL ~ zscore_elev  + (1 | year) + (1 | Hylak_id),
+                 data = z.scores, prior = priors.ctrls,
+                 family = student(), iter = 8000, warmup = 1000, chains = 4, 
+                 file = "model_files/dwl_ctrls_elev_model")
+end <- Sys.time()
+(time.diff <- end - start)
+
+```
+
+
+```{r}
+# check models
+pp_check(dwl.climate); summary(dwl.climate)
+pp_check(dwl.elev); summary(dwl.elev)
+```
+
+
+
+```{r}
+lmer.climate <- lmer(zscore_dWL ~ zscore_temp + zscore_precip + (1 | year) + (1 | Hylak_id), data = z.scores)
+summary(lmer.climate); confint(lmer.climate)
+
+
+lmer.elev <- lmer(zscore_dWL ~ zscore_elev +  (1 | year) + (1 | Hylak_id), data = z.scores)
+summary(lmer.elev); confint(lmer.elev)
+```

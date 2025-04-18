@@ -1,0 +1,292 @@
+---
+title: "Merge Groundwater level and DWL data"
+author: "Daniel Gschwentner"
+date: "2025-02-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir = "C:/Users/DanielGschwentner/OneDrive - University of Nebraska-Lincoln/Sandhills LimnoSat lake color v2")
+```
+
+```{r}
+rm(list = ls())
+library(tidyverse)
+library(sf)
+source("code/theme_R.r")
+```
+
+## Load data sets
+
+Limnosat DWL data
+
+```{r}
+# data
+sh.annual <- read_csv("data/Sandhills_limnosat_annual_medians_17Feb25.csv")
+sh.monthly <- read_csv("data/Sandhills_limnosat_no_winter_17Feb25.csv")
+``` 
+## Geospatial analysis
+
+Note to myself on 18-Feb-25: I decided to make the data wrangling more reproduceable as there were some issues with disappearing lakes when I reassembled the limnosat data set. The code now selects lakes that are within the 20 km buffer of the selected groundwater wells AND includes the lakes from VLNWR (these are manually added).
+
+Load GIS data
+
+```{r}
+# wells
+wells.2.keep <- st_read(dsn = "data/GIS/sandhill_lakes.gpkg", layer = "final_groundwater_wells")  # file with 9 wells for which we have GW data
+# wells buffer
+wells.2.keep.buffer <- st_read(dsn = "data/GIS/sandhill_lakes.gpkg", layer = "gw_wells_20km_buffer") %>% # gotta filter this because there are one or two extra buffers for some reason
+  filter(SiteNo %in% wells.2.keep$SiteNo)
+# valentine National Valetine Wildlife Refuge
+vlnwr <- st_read(dsn = "data/GIS/sandhill_lakes.gpkg", layer = "usgs_refuges" ) %>%
+  filter(ORGNAME == "VALENTINE NATIONAL WILDLIFE REFUGE")
+# all lakes
+lakes <- read_csv("data/Sandhills_limnosat_annual_medians_17Feb25.csv") %>%
+  dplyr::select(Hylak_id, lon, lat) %>% distinct() %>%
+  st_as_sf(., coords = c("lon", "lat"))
+st_crs(lakes) <- 3857
+```
+
+```{r}
+# check overlap of data <-- this looks good so we can proceed with lake selection
+ggplot() + 
+  geom_sf(data = wells.2.keep.buffer) +
+  geom_sf(data = vlnwr) + 
+  geom_sf(data = lakes)
+```
+## GIS wrangling
+
+Select lakes in buffers and VLNWR
+```{r}
+# lakes in the buffer
+buffer.lakes <- st_filter(lakes, wells.2.keep.buffer, .predicate = st_within)
+buffer.lakes <- st_join(buffer.lakes, wells.2.keep.buffer, .predicate = st_within)
+
+# lakes in vlnwr
+vlnwr.lakes <- st_filter(lakes, vlnwr, .predicate = st_within)
+vlnwr.lakes <- vlnwr.lakes %>% mutate(SiteNo = 40, Name =  "SECherryCounty", lon = -100.5313, lat = 42.21729)
+
+# merge
+selected.lakes <- rbind(buffer.lakes, vlnwr.lakes)
+
+```
+
+Distance matrix between lakes and wells
+
+```{r}
+
+## Generate distance matrix
+
+# distance matrix is in units m
+d.matrix <- st_distance(selected.lakes, wells.2.keep) %>% as.data.frame()
+# add Hylak_id
+d.matrix$Hylak_id <- selected.lakes$Hylak_id
+# wide to long and some formatting
+d.matrix <- d.matrix %>%
+  gather("SiteNo", "dist_m", -Hylak_id) %>%
+  mutate(SiteNo = rep(c(22, 27, 44, 39, 46, 36, 8, 40, 13), each = nrow(selected.lakes)),
+         dist_km = units::drop_units(dist_m)/1000)
+```
+
+Merge data sets
+```{r}
+## Add distance matrix to selected lakes
+selected.lakes <- merge(selected.lakes, d.matrix, by = c("Hylak_id", "SiteNo"))
+
+```
+
+Overview of the selected lakes per well and mean distances
+```{r}
+selected.lakes.summary <- selected.lakes %>% group_by(Name) %>%
+  summarise(n = n(), mean_dist_km2 = mean(dist_km), min_dist_km2 = min(dist_km), max_dist_km2 = max(dist_km))
+mean(selected.lakes.summary$n); mean(selected.lakes.summary$mean_dist_km2)
+```
+
+Save output
+
+```{r}
+#st_write(selected.lakes, dsn = "data/GIS/sandhill_lakes.gpkg", layer = "selected_gw_lakes_18Feb25")
+selected.lakes <- sf::st_read(dsn = "data/GIS/sandhill_lakes.gpkg", layer = "selected_gw_lakes_18Feb25")
+```
+## Load groundwater data
+Load groundwater data (previously cleaned)
+
+```{r}
+# load groundwater data
+gw.input <- read_csv("data/GWL/sandhills_gwl_monthly_clean.csv")
+# filter
+gw.input <- gw.input %>% filter(SiteNo %in% selected.lakes$SiteNo)
+# aggregate on an annual base
+gw.annual <- gw.input %>% 
+  mutate(year = year(date)) %>% 
+  group_by(SiteNo, Name, year) %>%
+  summarise(gwl_bl_surface_ft = mean(gwl_bl_surface_ft))
+#write_csv(gw.annual, "data/annual_gw_levels.csv")
+```
+
+```{r}
+# thiel-sen slopes for GW
+# sheridan
+sheridan <- gw.annual[gw.annual$Name == "SheridanSouth",]
+sheridan <- ts(sheridan$gwl_bl_surface_ft[1:12], start = 2008, end = 2019) 
+sheridan.sen <- trend::sens.slope(sheridan)
+sheridan.sen
+
+# antioch
+antioch <- gw.annual[gw.annual$Name == "Antioch",]
+antioch <- ts(antioch$gwl_bl_surface_ft[1:12], start = 2008, end = 2019) 
+antioch.sen <- trend::sens.slope(antioch)
+antioch.sen
+
+# Crescent Lake
+crescent <- gw.annual[gw.annual$Name == "CrescentLake",]
+crescent <- ts(crescent$gwl_bl_surface_ft[1:12], start = 2008, end = 2019) 
+crescent.sen <- trend::sens.slope(crescent)
+crescent.sen
+
+# SW Cherry County Lake
+swcherry <- gw.annual[gw.annual$Name == "SWCherryCounty",]
+swcherry <- ts(swcherry$gwl_bl_surface_ft[1:12], start = 2008, end = 2019) 
+swcherry.sen <- trend::sens.slope(swcherry)
+swcherry.sen
+
+# Grant County
+grant <- gw.annual[gw.annual$Name == "GrantCounty",]
+grant <- ts(grant$gwl_bl_surface_ft[1:12], start = 2008, end = 2019) 
+grant.sen <- trend::sens.slope(grant)
+grant.sen
+
+# Cherry County
+cherry <- gw.annual[gw.annual$Name == "CherryCounty",]
+cherry <- ts(cherry$gwl_bl_surface_ft[1:12], start = 2008, end = 2019) 
+cherry.sen <- trend::sens.slope(cherry)
+cherry.sen
+
+# Arthur County
+arthur <- gw.annual[gw.annual$Name == "ArthurCounty",]
+arthur <- ts(arthur$gwl_bl_surface_ft[1:12], start = 2008, end = 2019) 
+arthur.sen <- trend::sens.slope(arthur)
+arthur.sen
+
+# SE Cherry County
+SECherry <- gw.annual[gw.annual$Name == "SECherryCounty",]
+SECherry <- ts(SECherry$gwl_bl_surface_ft[1:12], start = 2008, end = 2019) 
+SECherry.sen <- trend::sens.slope(SECherry)
+SECherry.sen
+
+# Barta Brothers
+barta <- gw.annual[gw.annual$Name == "BartaBrothers",]
+barta <- ts(barta$gwl_bl_surface_ft[1:12], start = 2008, end = 2019) 
+barta.sen <- trend::sens.slope(barta)
+barta.sen
+
+```
+
+
+```{r}
+# arrange groundwater levels from W to E
+gw.annual$Name <- factor(gw.annual$Name, levels = c("SheridanSouth", "Antioch", "CrescentLake", "SWCherryCounty", "GrantCounty", "CherryCounty", "ArthurCounty", "SECherryCounty", "BartaBrothers"))
+
+# add in sign. from Thiel-Sen
+gw.annual$sign <- ifelse(gw.annual$Name %in% c("CherryCounty", "SECherryCounty", "BartaBrothers"), "n.s.", "sign.")
+
+scaleFUN <- function(x) sprintf("%.0f", x)
+# plot groundwater trends
+(gw.raw <- gw.annual %>%
+  ggplot(aes(year, gwl_bl_surface_ft, group = SiteNo, col = Name, alpha = sign)) + 
+  geom_hline(yintercept = 0, lty = "dashed", col = "black") + 
+  geom_line(lwd = 0.75) + geom_point(pch = 21, fill = "white", size = 2, stroke = 0.75) + 
+  labs(x = NULL, y = "Groundwater level \n ft. below surface", col = NULL) + 
+  scale_x_continuous(limits = c(2008, 2019), labels = scaleFUN) + scale_y_reverse() + 
+  ggsci::scale_color_jco() + theme(legend.position = "right") )
+ggsave("figures/gw_trends.jpg", gw.raw, width = 7, height = 3.5, dpi = 500)
+
+```
+
+```{r}
+# descriptive stats
+gw.annual %>% filter(year < 2019) %>% 
+  group_by(Name) %>% 
+  summarise(mean = mean(gwl_bl_surface_ft),
+            min = min(gwl_bl_surface_ft),
+            max = max(gwl_bl_surface_ft)) %>% 
+  arrange(mean)
+```
+
+## Data aggregation and filtering
+
+```{r}
+# select groundwater lakes
+limnosat.gw <-  sh.annual %>% filter(Hylak_id %in% selected.lakes$Hylak_id)
+# add gwl-ID
+limnosat.gw <- merge(limnosat.gw, selected.lakes[,c("Hylak_id", "SiteNo", "Name", "dist_km")], by = "Hylak_id")
+```
+
+
+```{r}
+# merge data sets
+dwl.gwl <- merge(limnosat.gw, gw.annual, by = c("year","Name", "SiteNo"), all.x = F, all.y = F)
+
+```
+Save output
+
+```{r}
+#write_csv(dwl.gwl, "data/Sandhills_limnosat_annual_medians_gw_18Feb25.csv")
+```
+
+
+## Aggregate on a monthly basis
+(for fun and testing)
+
+```{r}
+# aggregate GW on monthly basis
+gw.monthly <- gw.input %>%
+  mutate(year = year(date), month = month(date), date = ymd(paste0(year, "/", month, "/01"))) %>%
+  group_by(SiteNo, Name, date) %>% 
+  summarise(gwl_bl_surface_ft = mean(gwl_bl_surface_ft))
+
+```
+
+
+
+```{r}
+# arrange groundwater levels from W to E
+gw.monthly$Name <- factor(gw.monthly$Name, levels = c("SheridanSouth", "Antioch", "CrescentLake", "SWCherryCounty", "GrantCounty", "CherryCounty", "ArthurCounty", "SECherryCounty", "BartaBrothers"))
+
+scaleFUN <- function(x) sprintf("%.0f", x)
+# plot groundwater trends
+(gw.raw2 <- gw.monthly %>%
+  ggplot(aes(date, gwl_bl_surface_ft, group = SiteNo, col = Name)) + 
+  geom_hline(yintercept = 0, lty = "dashed", col = "black") + 
+  geom_line(lwd = 0.75) +  #geom_point(pch = 21, fill = "white", size = 2, stroke = 0.75) + 
+  labs(x = NULL, y = "Groundwater level \n ft. below surface", col = NULL) + 
+  scale_x_continuous(limits = as.Date(c("2008-01-01", "2020-01-01")), labels = scaleFUN) + 
+  scale_y_reverse() + 
+  ggsci::scale_color_jco() + theme(legend.position = "right") )
+#ggsave("figures/gw_trends.jpg", gw.raw, width = 7, height = 3, dpi = 500)
+
+```
+
+
+```{r}
+# select groundwater lakes
+limnosat.gw2 <-  sh.monthly %>% filter(Hylak_id %in% selected.lakes$Hylak_id)
+# add gwl-ID
+limnosat.gw2 <- merge(limnosat.gw2, selected.lakes[,c("Hylak_id", "SiteNo", "Name", "dist_km")], by = "Hylak_id")
+```
+
+
+```{r}
+# merge data sets
+dwl.gwl2 <- merge(limnosat.gw2, gw.input, by = c("date","Name", "SiteNo"), all.x = F, all.y = F)
+
+```
+Save output
+
+```{r}
+#write_csv(dwl.gwl2, "data/Sandhills_limnosat_monthly_gw_18Feb25.csv")
+```
+
+
+
